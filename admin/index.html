@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>VoxelCraft Server Panel</title>
+<style>
+  :root{color-scheme:dark;--bg:#0b1018;--panel:#151d29;--line:#2b3a4c;--text:#e9f0f7;--muted:#92a6bc;--green:#55c56b;--red:#d85c66;--gold:#f5c76b}
+  *{box-sizing:border-box} body{margin:0;background:linear-gradient(135deg,#0b1018,#111b27);color:var(--text);font-family:ui-monospace,SFMono-Regular,Consolas,monospace;min-height:100vh}
+  header{padding:24px clamp(18px,5vw,60px);border-bottom:1px solid var(--line);background:#101722dd;position:sticky;top:0;backdrop-filter:blur(8px);z-index:2}
+  h1{margin:0 0 8px;color:#82e58d;font-size:clamp(20px,3vw,32px)} h2{font-size:14px;color:var(--gold);margin:0 0 16px} p{color:var(--muted);font-size:12px;line-height:1.7}
+  main{max-width:1200px;margin:0 auto;padding:24px clamp(18px,5vw,60px) 60px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px}.card{background:#151d29;border:1px solid var(--line);border-radius:10px;padding:18px;box-shadow:0 14px 40px #0003}.wide{grid-column:1/-1}
+  .metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}.metric{padding:12px;background:#0e151f;border:1px solid #263547;border-radius:7px}.metric b{display:block;font-size:20px;color:#fff;margin-top:5px}.metric span{font-size:10px;color:var(--muted)}
+  button,input,select{font:inherit} button{background:#304258;color:#fff;border:1px solid #4b627d;border-radius:6px;padding:10px 12px;cursor:pointer;margin:4px 4px 4px 0}button:hover{background:#3b536c}button.green{background:#276f3a;border-color:#4eaf61}button.red{background:#762f39;border-color:#b34f5c} input,select{width:100%;background:#0c131c;border:1px solid #34485e;color:#fff;border-radius:6px;padding:10px;margin:5px 0 10px} label{font-size:10px;color:var(--muted)}
+  .status{font-size:12px;padding:9px;border-radius:6px;background:#0e151f;color:var(--muted);margin-bottom:14px}.status.ok{color:#9bf0a4;border-left:3px solid var(--green)}.status.bad{color:#ffabb0;border-left:3px solid var(--red)}
+  table{width:100%;border-collapse:collapse;font-size:11px}th,td{text-align:left;padding:10px 7px;border-bottom:1px solid #263547}th{color:var(--muted);font-weight:normal}.empty{color:var(--muted);padding:14px 0;font-size:12px}.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.row>*{flex:1}.row button{flex:0 0 auto}
+  pre{white-space:pre-wrap;word-break:break-word;max-height:260px;overflow:auto;background:#0a1017;border:1px solid #243344;border-radius:6px;padding:12px;color:#b7c8da;font-size:11px}.warning{color:#ffd08a;font-size:11px;line-height:1.6}
+</style>
+</head>
+<body>
+<header><h1>VOXELCRAFT SERVER PANEL</h1><p>Control the LAN or internet server from one dashboard.</p></header>
+<main>
+  <div id="status" class="status">Enter the administrator token to connect.</div>
+  <section class="grid">
+    <div class="card wide"><h2>ADMIN ACCESS</h2><div class="row"><div><label>ADMIN TOKEN</label><input id="token" type="password" placeholder="change-me"></div><button class="green" id="connect">CONNECT PANEL</button></div></div>
+    <div class="card"><h2>SERVER STATUS</h2><div class="metrics"><div class="metric"><span>ONLINE</span><b id="online">—</b></div><div class="metric"><span>UPTIME</span><b id="uptime">—</b></div><div class="metric"><span>REVISION</span><b id="revision">—</b></div></div><p id="worldInfo">No data yet.</p><button id="refresh">REFRESH</button></div>
+    <div class="card"><h2>WORLD CONTROLS</h2><label>ACTIVE GAME / WORLD</label><select id="worldSelect"></select><button class="green" id="selectWorld">SELECT WORLD</button><hr><label>CREATE RANDOM WORLD</label><input id="newWorldName" maxlength="40" placeholder="world name"><input id="newWorldSeed" placeholder="optional seed · blank = random"><select id="newWorldMode"><option value="creative">Creative</option><option value="survival">Survival</option></select><button class="green" id="createWorld">CREATE AND ACTIVATE</button><hr><label>GAME MODE</label><select id="mode"><option value="creative">Creative</option><option value="survival">Survival</option></select><button class="green" id="applyMode">APPLY MODE</button><br><label>DAY TIME, 0 TO 1</label><input id="time" type="range" min="0" max="0.999" step="0.001" value="0.28"><button id="applyTime">SET TIME</button><button id="save">SAVE WORLD</button><button id="download">DOWNLOAD WORLD</button><hr><label>IMPORT PREVIOUS JSON WORLD FILE</label><input id="uploadFile" type="file" accept=".json,.voxelcraft,application/json"><button class="green" id="upload">UPLOAD AND REPLACE WORLD</button><p class="warning">Switching or importing replaces the active game for connected players. A backup is created before replacement.</p></div>
+    <div class="card wide"><h2>ONLINE PLAYERS</h2><div id="players" class="empty">No data yet.</div></div>
+    <div class="card wide"><h2>SERVER NOTES</h2><pre>For LAN: bind the server to 0.0.0.0 and let players open the server computer's LAN address.
+For internet: use HTTPS/WSS behind a reverse proxy and set a strong ADMIN_TOKEN environment variable.</pre></div>
+  </section>
+</main>
+<script>
+const $=s=>document.querySelector(s);
+let token=localStorage.getItem('voxelcraftAdminToken')||'';
+$('#token').value=token;
+function setStatus(text,ok=false){$('#status').textContent=text;$('#status').className='status '+(ok?'ok':'bad')}
+function headers(){return {'Content-Type':'application/json','x-admin-token':token}}
+async function api(path,options={}){const r=await fetch(path,{...options,headers:{...headers(),...(options.headers||{})}});const d=await r.json().catch(()=>({}));if(!r.ok)throw Error(d.error||'Request failed');return d}
+function fmt(seconds){if(!Number.isFinite(seconds))return '—';const h=Math.floor(seconds/3600),m=Math.floor(seconds%3600/60),s=Math.floor(seconds%60);return `${h}h ${m}m ${s}s`}
+async function refresh(){try{const [s,p]=await Promise.all([api('/api/status'),api('/api/admin/players')]);$('#online').textContent=`${s.players}/${s.maxPlayers}`;$('#uptime').textContent=fmt(s.uptime);$('#revision').textContent=s.world.revision;$('#mode').value=s.world.mode;$('#time').value=s.world.dayTime;$('#worldInfo').textContent=`${s.world.name} · seed ${s.world.seed} · edits ${s.world.edits} · saved ${s.world.savedAt||'not yet'}`;renderWorlds(s.worlds||[],s.activeWorldId);renderPlayers(p.players);setStatus('Connected to VoxelCraft Server',true)}catch(e){setStatus(e.message)}}
+function renderWorlds(list,active){const el=$('#worldSelect');el.innerHTML='';list.forEach(w=>{const o=document.createElement('option');o.value=w.id;o.textContent=`${w.name} · seed ${w.seed}${w.active?' · ACTIVE':''}`;el.appendChild(o)});if(active)el.value=active}
+function renderPlayers(list){if(!list.length){$('#players').innerHTML='<div class="empty">No players online.</div>';return}$('#players').innerHTML='<table><thead><tr><th>NAME</th><th>ID</th><th>POSITION</th><th>MODE</th><th>ACTION</th></tr></thead><tbody>'+list.map(p=>`<tr><td>${esc(p.name)}</td><td>${esc(p.id)}</td><td>${p.x.toFixed(1)} / ${p.y.toFixed(1)} / ${p.z.toFixed(1)}</td><td>${esc(p.mode)}</td><td><button class="red" data-kick="${esc(p.id)}">KICK</button></td></tr>`).join('')+'</tbody></table>';document.querySelectorAll('[data-kick]').forEach(b=>b.onclick=async()=>{try{await api('/api/admin/players/kick',{method:'POST',body:JSON.stringify({id:b.dataset.kick})});refresh()}catch(e){setStatus(e.message)}})}
+function esc(v){return String(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+$('#connect').onclick=()=>{token=$('#token').value.trim();localStorage.setItem('voxelcraftAdminToken',token);refresh()};
+$('#refresh').onclick=refresh;
+$('#selectWorld').onclick=async()=>{try{await api('/api/admin/world/select',{method:'POST',body:JSON.stringify({id:$('#worldSelect').value})});refresh()}catch(e){setStatus(e.message)}};
+$('#createWorld').onclick=async()=>{try{const name=$('#newWorldName').value.trim()||'Random World';const seed=$('#newWorldSeed').value.trim();const body={name,mode:$('#newWorldMode').value,activate:true};if(seed)body.seed=Number(seed);const result=await api('/api/admin/world/create',{method:'POST',body:JSON.stringify(body)});$('#newWorldName').value='';$('#newWorldSeed').value='';setStatus(`Created ${result.world.name} · seed ${result.world.seed}`,true);refresh()}catch(e){setStatus(e.message)}};
+$('#applyMode').onclick=async()=>{try{await api('/api/admin/world/mode',{method:'POST',body:JSON.stringify({mode:$('#mode').value})});refresh()}catch(e){setStatus(e.message)}};
+$('#applyTime').onclick=async()=>{try{await api('/api/admin/world/time',{method:'POST',body:JSON.stringify({dayTime:Number($('#time').value)})});refresh()}catch(e){setStatus(e.message)}};
+$('#save').onclick=async()=>{try{await api('/api/admin/world/save',{method:'POST'});refresh()}catch(e){setStatus(e.message)}};
+$('#download').onclick=async()=>{try{const r=await fetch('/api/admin/world/download',{headers:{'x-admin-token':token}});if(!r.ok)throw Error('Download failed');const blob=await r.blob();const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='voxelcraft-main.json';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000)}catch(e){setStatus(e.message)}};
+$('#upload').onclick=async()=>{try{const file=$('#uploadFile').files[0];if(!file)throw Error('Choose a JSON world file first');if(!confirm('Replace the current server world with this file?'))return;const text=await file.text();const result=await api('/api/admin/world/upload',{method:'POST',body:text,headers:{'Content-Type':'application/json'}});setStatus(`World imported · seed ${result.seed} · edits ${result.edits}`,true);refresh()}catch(e){setStatus(e.message)}};
+setInterval(()=>{if(token)refresh()},5000);
+</script>
+</body>
+</html>

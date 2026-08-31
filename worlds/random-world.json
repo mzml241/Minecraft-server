@@ -1,0 +1,19 @@
+{
+  "format": "voxelcraft-server-world",
+  "version": 1,
+  "id": "random-world",
+  "name": "Random World",
+  "seed": 863953844,
+  "mode": "creative",
+  "dayTime": 0.8133333333333383,
+  "spawn": {
+    "x": 0.5,
+    "z": 0.5
+  },
+  "revision": 2,
+  "edits": {
+    "36,30,15": 0,
+    "37,30,15": 0
+  },
+  "savedAt": "2026-08-28T17:41:16.447Z"
+}

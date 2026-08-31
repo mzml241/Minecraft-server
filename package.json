@@ -1,0 +1,15 @@
+{
+  "name": "voxelcraft-server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "LAN and internet server for VoxelCraft",
+  "main": "server.js",
+  "scripts": {
+    "build": "node build-client.js",
+    "start": "node build-client.js && node server.js",
+    "dev": "node build-client.js && node --watch server.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}

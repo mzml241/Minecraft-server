@@ -1,0 +1,48 @@
+{
+  "format": "voxelcraft-server-world",
+  "version": 1,
+  "id": "random-world-6",
+  "name": "Random World",
+  "seed": 662178868,
+  "mode": "creative",
+  "dayTime": 0.38833333333333225,
+  "spawn": {
+    "x": 0.5,
+    "z": 0.5
+  },
+  "revision": 0,
+  "edits": {},
+  "doors": {},
+  "lights": {},
+  "claims": [],
+  "npcProperties": [],
+  "marketListings": [],
+  "marketHistory": [],
+  "constructionJobs": [],
+  "rentalOffers": [],
+  "rentalContracts": [],
+  "companies": [],
+  "landAuctions": [
+    {
+      "id": "auction_f57017cb58bd28e9",
+      "x": 1024,
+      "z": 1024,
+      "size": 16,
+      "tier": "Premium",
+      "reservePrice": 15200,
+      "currentBid": 0,
+      "bidderId": null,
+      "bidderName": null,
+      "heldAmount": 0,
+      "status": "open",
+      "startsAt": 1788142831919,
+      "endsAt": 1788229231919,
+      "winnerId": null,
+      "winnerName": null,
+      "claimId": null,
+      "createdAt": "2026-08-31T02:20:31.919Z",
+      "updatedAt": "2026-08-31T02:20:31.919Z"
+    }
+  ],
+  "savedAt": "2026-08-31T02:21:37.574Z"
+}
