@@ -648,7 +648,11 @@ function serverMapNoise(){
   return {a:mapNoiseA,b:mapNoiseB,c:mapNoiseC};
 }
 function serverSmoothstep(e0,e1,x){ const t=Math.max(0,Math.min(1,(x-e0)/(e1-e0))); return t*t*(3-2*t); }
+let serverTerrainCacheSeed=null,serverTerrainCache=new Map();
 function serverMapColumn(x,z){
+  x=Math.floor(x); z=Math.floor(z);
+  if(serverTerrainCacheSeed!==world.seed){serverTerrainCacheSeed=world.seed;serverTerrainCache=new Map();}
+  const key=x+','+z,cached=serverTerrainCache.get(key); if(cached)return cached;
   const n=serverMapNoise();
   const cont=n.a.fbm2(x*.0015,z*.0015,4);
   const hills=n.a.fbm2(x*.011+13.3,z*.011-7.7,3);
@@ -669,7 +673,7 @@ function serverMapColumn(x,z){
   else if(temp<-.30) biome='snowy';
   else if(humid>.17) biome='forest';
   else biome='plains';
-  return {h,biome};
+  const result={h,biome}; serverTerrainCache.set(key,result); if(serverTerrainCache.size>100000)serverTerrainCache.delete(serverTerrainCache.keys().next().value); return result;
 }
 function serverH2(x,z,salt){
   let h=Math.imul(x,0x27d4eb2d)^Math.imul(z,0x165667b1)^Math.imul(salt,0x9e3779b1); h^=h>>>15; h=Math.imul(h,0x85ebca6b); h^=h>>>13; h=Math.imul(h,0xc2b2ae35); h^=h>>>16; return (h>>>0)/4294967296;
@@ -737,11 +741,18 @@ function serverMapColumnWithEdits(x,z,terrain,cabin,editColumns){
   }
   return base;
 }
+let serverMapRasterCache=new Map();
 function serverMapRaster(url){
-  const centerX=integer(url.searchParams.get('x'),0), centerZ=integer(url.searchParams.get('z'),0);
+  // The public client marks low-priority map requests as coarse. Nearby
+  // coarse requests share a 16-block raster, avoiding a large synchronous
+  // noise raster every time a flying player moves by a few blocks.
+  const requestedCenterX=integer(url.searchParams.get('x'),0), requestedCenterZ=integer(url.searchParams.get('z'),0),coarse=url.searchParams.get('coarse')==='1';
+  const centerX=coarse?Math.round(requestedCenterX/16)*16:requestedCenterX, centerZ=coarse?Math.round(requestedCenterZ/16)*16:requestedCenterZ;
   const visibleRadius=clamp(integer(url.searchParams.get('radius'),96),48,420);
   const requestedStep=Number(url.searchParams.get('step'));
   const step=requestedStep===4?4:(requestedStep===2?2:1);
+  const cacheKey=[world.id,world.seed,world.revision,centerX,centerZ,visibleRadius,step].join('|');
+  const cached=serverMapRasterCache.get(cacheKey); if(cached) return cached;
   const radius=Math.max(visibleRadius+24,96), baseX=centerX-radius, baseZ=centerZ-radius;
   const grid=Math.ceil((radius*2+1)/step), editColumns=serverMapEditColumns(), cabinCache=new Map(), columns=new Array(grid*grid);
   for(let gz=0;gz<grid;gz++) for(let gx=0;gx<grid;gx++){
@@ -757,7 +768,10 @@ function serverMapRaster(url){
   }
   const markers=[];
   for(const [key,spec] of cabinCache){ if(!spec) continue; const [cx,cz]=key.split(',').map(Number); markers.push({type:'cabin',x:cx*16+7.5,z:cz*16+7.5}); }
-  return {type:'mapRaster',worldId:world.id,seed:world.seed,baseX,baseZ,radius,step,grid,colors:pixels.toString('base64'),markers};
+  const result={type:'mapRaster',worldId:world.id,seed:world.seed,baseX,baseZ,radius,step,grid,colors:pixels.toString('base64'),markers};
+  serverMapRasterCache.set(cacheKey,result);
+  if(serverMapRasterCache.size>24) serverMapRasterCache.delete(serverMapRasterCache.keys().next().value);
+  return result;
 }
 let serverEditTopRevision=-1, serverEditTopSeed=null, serverEditTopsCache=new Map(), serverEditIdsCache=new Map(), serverTopCache=new Map();
 function rebuildServerEditCaches(){
@@ -1769,7 +1783,7 @@ function rejectPermission(ws,x,y,z,access) {
   send(ws,{type:'permissionRejected',reason:access.reason||'no_permission',x,y,z,message:access.reason==='claim_required'?'Build, Break and private Use require a Claim':access.reason==='property_locked'?'Property is locked while listed on the market':access.reason==='construction_locked'?'Claim is locked while an NPC construction contract is active':'You do not have permission for this Claim'});
 }
 
-function commitEdit(client, x, y, z, id, oldId = null) {
+function commitEdit(client, x, y, z, id, oldId = null, serverMs = null) {
   const key = editKey(x, y, z);
   if (oldId !== null && world.edits[key] !== undefined && Number(world.edits[key]) !== Number(oldId)) {
     send(client.ws, { type: 'editRejected', reason: 'block_changed', x, y, z });
@@ -1777,7 +1791,7 @@ function commitEdit(client, x, y, z, id, oldId = null) {
   }
   world.edits[key] = id;
   world.revision += 1;
-  broadcast({ type: 'blockUpdate', x, y, z, id, revision: world.revision, by: client.id });
+  broadcast({ type: 'blockUpdate', x, y, z, id, revision: world.revision, by: client.id, serverMs: serverMs===null?undefined:Number(serverMs.toFixed(2)) });
   const editedClaim=world.claims.find(claim=>claimContainsPoint(claim,x+.5,z+.5));
   if(editedClaim){
     const ownerClient=Array.from(clients.values()).find(other=>other.joined&&other.playerId===editedClaim.ownerId);
@@ -2469,15 +2483,17 @@ function purchaseNpcClaim(client,result){
     }
 
     if (message.type === 'blockBreak' || message.type === 'blockPlace') {
+      const editStartedAt=performance.now();
       const x = integer(message.x, NaN), y = integer(message.y, NaN), z = integer(message.z, NaN);
-      if (!validBlockEdit(client, x, y, z)) return send(ws, { type: 'editRejected', reason: 'too_far_or_invalid', x, y, z });
+      if (!validBlockEdit(client, x, y, z)) return send(ws, { type: 'editRejected', reason: 'too_far_or_invalid', x, y, z, serverMs:Number((performance.now()-editStartedAt).toFixed(2)) });
       const access=claimAccess(client,x,z,'build'); if(!access.ok) return rejectPermission(ws,x,y,z,access);
+      const editServerMs=()=>performance.now()-editStartedAt;
       if (message.type === 'blockBreak') {
-        commitEdit(client, x, y, z, 0, message.oldId === undefined ? null : integer(message.oldId, -1));
+        commitEdit(client, x, y, z, 0, message.oldId === undefined ? null : integer(message.oldId, -1), editServerMs());
       } else {
         const idValue = integer(message.id, 0);
-        if (idValue <= 0 || idValue > MAX_BLOCK_ID) return send(ws, { type: 'editRejected', reason: 'invalid_block', x, y, z });
-        commitEdit(client, x, y, z, idValue, message.oldId === undefined ? null : integer(message.oldId, -1));
+        if (idValue <= 0 || idValue > MAX_BLOCK_ID) return send(ws, { type: 'editRejected', reason: 'invalid_block', x, y, z, serverMs:Number((performance.now()-editStartedAt).toFixed(2)) });
+        commitEdit(client, x, y, z, idValue, message.oldId === undefined ? null : integer(message.oldId, -1), editServerMs());
       }
       return;
     }

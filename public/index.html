@@ -1127,15 +1127,34 @@ function getBlock(x,y,z){
   const c=chunks.get(ck(cx,cz)); if(!c) return AIR;
   return c.data[(y<<8)|((z-cz*CS)<<4)|(x-cx*CS)];
 }
+const deferredMeshQueue=[],deferredMeshSet=new Set();
+function queueDeferredChunkMesh(ch){
+  if(!ch||!ch.built) return;
+  const key=ck(ch.cx,ch.cz); if(deferredMeshSet.has(key)) return;
+  deferredMeshSet.add(key); deferredMeshQueue.push(ch);
+}
+function flushDeferredChunkMeshes(budgetMs=3){
+  const startedAt=performance.now();
+  while(deferredMeshQueue.length&&performance.now()-startedAt<budgetMs){
+    const ch=deferredMeshQueue.shift(); deferredMeshSet.delete(ck(ch.cx,ch.cz));
+    if(chunks.get(ck(ch.cx,ch.cz))!==ch||!ch.built) continue;
+    buildChunkMesh(ch); buildChunkDecor(ch);
+  }
+}
 function rebuildChunkNeighbors(cx,cz){
   const around=[[cx-1,cz],[cx+1,cz],[cx,cz-1],[cx,cz+1]];
   for(const [nx,nz] of around){
     const n=chunks.get(ck(nx,nz));
-    if(n && n.built) buildChunkMesh(n);
+    if(n && n.built){
+      // Local keeps its original immediate behavior. The public multiplayer
+      // client batches neighbor remeshes so a flight stream cannot rebuild
+      // the same four meshes repeatedly in one frame.
+      if(window.__SERVER_DEPLOYMENT__===true&&started) queueDeferredChunkMesh(n); else buildChunkMesh(n);
+    }
   }
 }
 
-function setBlock(x,y,z,id){
+function setBlock(x,y,z,id,deferMesh=false){
   if(y<1||y>=H) return false;
   const cx=Math.floor(x/CS), cz=Math.floor(z/CS);
   const c=getChunk(cx,cz,true);
@@ -1148,6 +1167,9 @@ function setBlock(x,y,z,id){
   markMapSnapshotsDirty();
   let ov=overrides.get(ck(cx,cz)); if(!ov){ ov=new Map(); overrides.set(ck(cx,cz),ov); }
   ov.set(idx,id);
+  if(deferMesh&&window.__SERVER_DEPLOYMENT__===true&&started){
+    queueDeferredChunkMesh(c); rebuildChunkNeighbors(cx,cz); return true;
+  }
   buildChunkMesh(c);
   buildChunkDecor(c);
   rebuildChunkNeighbors(cx,cz);
@@ -1316,7 +1338,8 @@ function disposeChunk(ch){
     if(ch[k]){ ch[k].geometry.dispose(); scene.remove(ch[k]); ch[k]=null; }
   }
   if(ch.decor){ decorRoots.delete(ch.decor); scene.remove(ch.decor); ch.decor=null; }
-  chunks.delete(ck(ch.cx,ch.cz));
+  const queuedKey=ck(ch.cx,ch.cz); deferredMeshSet.delete(queuedKey);
+  chunks.delete(queuedKey);
 }
 
 /* =========================================================
@@ -1328,7 +1351,14 @@ const QUALITY_PRESETS={
   medium:{label:'MEDIUM',rd:6,pixelRatio:1.25,ao:true,clouds:true,particles:true,mapInterval:520,mapStep:1},
   high:{label:'HIGH',rd:8,pixelRatio:1.5,ao:true,clouds:true,particles:true,mapInterval:360,mapStep:1}
 };
-function qualityProfile(){ return QUALITY_PRESETS[settings.quality]||QUALITY_PRESETS.low; }
+function qualityProfile(){
+  const q=QUALITY_PRESETS[settings.quality]||QUALITY_PRESETS.low;
+  // Render's public client has to stay responsive on low-end devices. The
+  // Local build keeps the original quality choices; only the generated
+  // multiplayer client applies these conservative upper bounds.
+  if(typeof SERVER_DEPLOYMENT!=='undefined'&&SERVER_DEPLOYMENT) return {...q,rd:Math.min(q.rd,3),pixelRatio:Math.min(q.pixelRatio,1),ao:false,clouds:false,particles:false,mapInterval:Math.max(q.mapInterval,1000),mapStep:4};
+  return q;
+}
 const renderer = new THREE.WebGLRenderer({antialias:false, powerPreference:'high-performance'});
 renderer.setPixelRatio(Math.min(devicePixelRatio,1.5));
 renderer.setSize(innerWidth,innerHeight);
@@ -1956,6 +1986,25 @@ function updateInteractionHint(){
   }
   interactionHintEl.textContent=text; interactionHintEl.classList.toggle('show',!!text);
 }
+const pendingNetworkEdits=new Map();
+function networkEditKey(x,y,z){ return `${Math.floor(x)},${Math.floor(y)},${Math.floor(z)}`; }
+function predictNetworkEdit(x,y,z,id){
+  const key=networkEditKey(x,y,z),previous=getBlock(x,y,z);
+  if(previous===id) return false;
+  pendingNetworkEdits.set(key,{x,y,z,previous,next:id});
+  if(!setBlock(x,y,z,id)){ pendingNetworkEdits.delete(key); return false; }
+  return true;
+}
+function rollbackNetworkEdit(x,y,z){
+  const key=networkEditKey(x,y,z),pending=pendingNetworkEdits.get(key);
+  if(!pending) return;
+  pendingNetworkEdits.delete(key);
+  setBlock(pending.x,pending.y,pending.z,pending.previous,window.__SERVER_DEPLOYMENT__===true);
+}
+function clearPendingNetworkEdits(){
+  [...pendingNetworkEdits.values()].forEach(pending=>rollbackNetworkEdit(pending.x,pending.y,pending.z));
+  pendingNetworkEdits.clear();
+}
 function tryPlace(){
   if(objectTarget){ interactWithObject(objectTarget); return; }
   if(!target) return;
@@ -1972,8 +2021,12 @@ function tryPlace(){
   const h=player.half, p=player.pos;
   if(nx+1>p.x-h && nx<p.x+h && nz+1>p.z-h && nz<p.z+h && ny+1>p.y && ny<p.y+player.height) return;
   if(multiplayer.connected){
-    multiplayer.send({type:'blockPlace',x:nx,y:ny,z:nz,id:hotbar[slot],oldId:cur});
-    swing=1; return;
+    const id=hotbar[slot];
+    if(predictNetworkEdit(nx,ny,nz,id)){
+      multiplayer.send({type:'blockPlace',x:nx,y:ny,z:nz,id,oldId:cur});
+      Snd.place(); swing=1;
+    }
+    return;
   }
   if(setBlock(nx,ny,nz,hotbar[slot])){ Snd.place(); swing=1; }
 }
@@ -1982,8 +2035,12 @@ function tryBreak(){
   const bd=BLOCKS[target.id];
   if(bd.unbreakable){ toast("Bedrock cannot be broken"); return; }
   if(multiplayer.connected){
-    multiplayer.send({type:'blockBreak',x:target.x,y:target.y,z:target.z,oldId:target.id});
-    swing=1; mineTarget=null; mineProgress=0; creativeCD=0.16; return;
+    const x=target.x,y=target.y,z=target.z;
+    if(predictNetworkEdit(x,y,z,AIR)){
+      multiplayer.send({type:'blockBreak',x,y,z,oldId:target.id});
+      spawnParticles(x,y,z,target.id); Snd.break_(); swing=1; mineTarget=null; mineProgress=0; creativeCD=0.16;
+    }
+    return;
   }
   spawnParticles(target.x,target.y,target.z,target.id);
   setBlock(target.x,target.y,target.z,AIR);
@@ -2507,7 +2564,10 @@ const bindRange=(id,valId,key,fmt)=>{
     if(key==='fov'){ camera.fov=settings.fov; camera.updateProjectionMatrix(); }
     if(key==='ao'){ chunks.forEach(c=>buildChunkMesh(c)); }
     if(key==='clouds'){ clouds.visible=settings.clouds; }
-    if(key==='rd'){ updateFog(); queueDirty=true; }
+    if(key==='rd'){
+      if(typeof SERVER_DEPLOYMENT!=='undefined'&&SERVER_DEPLOYMENT) settings.rd=Math.min(settings.rd,3);
+      updateFog(); queueDirty=true;
+    }
   });
 };
 bindRange('#sRD','#vRD','rd');
@@ -2524,9 +2584,12 @@ function updateFog(){
   scene.fog.near=d*0.52; scene.fog.far=d*0.98;
 }
 function applyGraphicsQuality(name,announce=true){
-  const key=QUALITY_PRESETS[name]?name:'low', q=QUALITY_PRESETS[key];
-  settings.quality=key; settings.rd=q.rd; settings.ao=q.ao; settings.clouds=q.clouds; settings.particles=q.particles; settings.decorations=true; settings.mapInterval=q.mapInterval;
-  renderer.setPixelRatio(Math.min(devicePixelRatio,q.pixelRatio));
+  const key=QUALITY_PRESETS[name]?name:'low', q=QUALITY_PRESETS[key],serverSafe=typeof SERVER_DEPLOYMENT!=='undefined'&&SERVER_DEPLOYMENT;
+  settings.quality=key;
+  settings.rd=serverSafe?Math.min(q.rd,3):q.rd;
+  settings.ao=serverSafe?false:q.ao; settings.clouds=serverSafe?false:q.clouds; settings.particles=serverSafe?false:q.particles;
+  settings.decorations=true; settings.mapInterval=serverSafe?Math.max(q.mapInterval,1000):q.mapInterval;
+  renderer.setPixelRatio(Math.min(devicePixelRatio,serverSafe?1:q.pixelRatio));
   clouds.visible=settings.clouds; updateFog(); queueDirty=true; markMapSnapshotsDirty();
   chunks.forEach(c=>{buildChunkMesh(c);buildChunkDecor(c);});
   const qualityEl=$('#sQuality'); if(qualityEl) qualityEl.value=key;
@@ -2759,7 +2822,7 @@ function updateClaimWorldVisuals(){
   updateOwnershipTag();
 }
 const multiplayer={
-  socket:null, connected:false, joining:false, id:null, username:'', password:'', sessionToken:'', freeClaimAvailable:true, name:'Player', url:'', ping:0, sendTimer:0,
+  socket:null, connected:false, joining:false, id:null, username:'', password:'', sessionToken:'', freeClaimAvailable:true, name:'Player', url:'', ping:0, lastEditServerMs:0, lastMessageAt:0, sendTimer:0, pingTimer:0,
   send(data){ if(this.socket?.readyState===WebSocket.OPEN) this.socket.send(JSON.stringify(data)); },
   clearRememberedSession(){ this.sessionToken=''; try{localStorage.removeItem(SERVER_SESSION_STORAGE_KEY);}catch(error){} },
   connect(url,name,username,password,sessionToken=''){
@@ -2768,7 +2831,7 @@ const multiplayer={
     this.url=url; this.name=(name||'Player').trim().slice(0,24)||'Player'; this.username=(username||'').trim().toLowerCase(); this.password=String(password||''); this.sessionToken=String(sessionToken||'');
     setMpStatus('CONNECTING · '+url);
     try{ this.socket=new WebSocket(url); }catch(e){ setMpStatus('ERROR · invalid server link',true); return; }
-    this.joining=true;
+    this.joining=true; this.pingTimer=0; this.lastMessageAt=performance.now();
     this.socket.addEventListener('open',()=>{
       const remembered=this.sessionToken?{sessionToken:this.sessionToken}:{};
       this.send({type:'join',name:this.name,username:this.username,password:this.password,...remembered});
@@ -2788,6 +2851,7 @@ const multiplayer={
   },
   disconnect(show=true){
     if(this.socket){ try{ this.socket.close(1000,'client disconnected'); }catch(e){} }
+    clearPendingNetworkEdits();
     this.socket=null; this.connected=false; this.joining=false; this.id=null; this.sendTimer=0;
     clearRemotePlayers(); clearAmbientEntities(); resetPlayerHealth();
     applyClaimSnapshot(null,[]); knownPlayers=[]; claimSelectionMode=false; claimPreview=null; permissionPanelOpen=false; landInspectMode=false; landQuote=null; propertyReport=null; businessTerritorySelection=null; marketListings=[]; marketCommissionRate=.05; businesses=[]; rentals={offers:[],contracts:[]}; companies=[]; landAuctions=[]; walletState={balance:0,initialBalance:0,totalEarned:0,totalSpent:0,transactionCount:0,ledger:[]}; updateWalletHud(); prefabCatalog=[]; prefabPreview=null; constructionCatalog=[]; constructionJobs=[]; constructionPreview=null; clearPrefabGhost?.(); renderStoreCatalog?.(); renderConstructionDashboard?.(); updateClaimControls?.();
@@ -2883,15 +2947,22 @@ const multiplayer={
     if(m.type==='doorState'){ applyDoorState(Number(m.x)||0,Number(m.y)||0,Number(m.z)||0,!!m.open); return; }
     if(m.type==='lightState'){ applyLanternState(Number(m.x)||0,Number(m.y)||0,Number(m.z)||0,!!m.on); return; }
     if(m.type==='blockUpdate'){
+      if(Number.isFinite(Number(m.serverMs))) this.lastEditServerMs=Number(m.serverMs);
       if(Number.isInteger(m.x)&&Number.isInteger(m.y)&&Number.isInteger(m.z)) applyNetworkBlock(m.x,m.y,m.z,clamp(Number(m.id)||0,0,BLOCKS.length-1));
       return;
     }
-    if(m.type==='editRejected'){ addMpChat('Server rejected block edit: '+(m.reason||'not allowed')); return; }
+    if(m.type==='editRejected'){
+      if(Number.isInteger(m.x)&&Number.isInteger(m.y)&&Number.isInteger(m.z)) rollbackNetworkEdit(m.x,m.y,m.z);
+      addMpChat('Server rejected block edit: '+(m.reason||'not allowed')); return;
+    }
     if(m.type==='objectInteractAccepted'){ openObjectPanel(m.object,{x:Number(m.x)+.5,y:Number(m.y)+.5,z:Number(m.z)+.5}); return; }
     if(m.type==='objectInteractRejected'){ toast(m.message||'Object interaction rejected'); return; }
     if(m.type==='objectState'){ if(m.by!==this.id) addMpChat('A player interacted with '+String(m.object||'object')); return; }
     if(m.type==='npcPropertyAdded'){ addMpChat('NPC Buyback added a Property to the world inventory'); return; }
-    if(m.type==='permissionRejected'){ addMpChat(m.message||'Claim permission required'); toast(m.message||'Claim permission required'); closeObjectPanel?.(); return; }
+    if(m.type==='permissionRejected'){
+      if(Number.isInteger(m.x)&&Number.isInteger(m.y)&&Number.isInteger(m.z)) rollbackNetworkEdit(m.x,m.y,m.z);
+      addMpChat(m.message||'Claim permission required'); toast(m.message||'Claim permission required'); closeObjectPanel?.(); return;
+    }
     if(m.type==='worldTime'){ dayTime=Number(m.dayTime)||0; return; }
     if(m.type==='serverMode'){
       player.mode=m.mode==='survival'?'survival':'creative';
@@ -2910,6 +2981,10 @@ const multiplayer={
   },
   tick(dt,paused){
     if(!this.connected) return;
+    this.pingTimer+=dt;
+    if(this.pingTimer>=1){
+      this.pingTimer=0; this.send({type:'ping',sentAt:performance.now()});
+    }
     this.sendTimer+=dt;
     if(!paused && this.sendTimer>=0.05){
       this.sendTimer=0;
@@ -3266,6 +3341,11 @@ function setWorldEditOverride(x,y,z,id){
   markMapSnapshotsDirty();
 }
 function applyNetworkBlock(x,y,z,id){
+  const key=networkEditKey(x,y,z),pending=pendingNetworkEdits.get(key);
+  // A matching authoritative update confirms the local prediction. If an
+  // earlier update for the same voxel is still in flight, keep that newer
+  // prediction pending and let the ordered Server stream catch up.
+  if(pending&&pending.next===id) pendingNetworkEdits.delete(key);
   const cx=Math.floor(x/CS),cz=Math.floor(z/CS),ch=chunks.get(ck(cx,cz));
   if(ch) setBlock(x,y,z,id); else setWorldEditOverride(x,y,z,id);
 }
@@ -3384,7 +3464,11 @@ function drawMapMarker(ctx,x,z,yaw,color,me,label){
 let mapRadius=70;
 function dynamicMapRadius(){
   const speed=Math.hypot(player.vel.x,player.vel.z);
-  const wanted=clamp(68+speed*5.2,68,132);
+  // The map is telemetry/wayfinding, not gameplay-critical. Only the public
+  // Server deployment uses the bounded profile; the Local build keeps its
+  // original map coverage and update behavior.
+  const serverSafeMap=window.__SERVER_DEPLOYMENT__===true;
+  const wanted=serverSafeMap?clamp(68+speed*2.2,68,102):clamp(68+speed*5.2,68,132);
   mapRadius=lerp(mapRadius,wanted,.18);
   return Math.round(mapRadius);
 }
@@ -3676,8 +3760,9 @@ function initMapWorker(){
     };
   }catch(error){console.warn('Map Worker unavailable; using staged fallback.',error);mapWorker=null;}
 }
+function mapCenterForRaster(value){ return window.__SERVER_DEPLOYMENT__===true?Math.round(value/16)*16:Math.floor(value); }
 function queueWorkerMapSnapshot(visibleRadius,step,centerX=player.pos.x,centerZ=player.pos.z,target='mini'){
-  const snapshotRadius=clamp(Math.max(visibleRadius+24,96),96,444),grid=Math.ceil((snapshotRadius*2+1)/step),bx=Math.floor(centerX),bz=Math.floor(centerZ),key=`${target}:${bx}:${bz}:${Math.round(visibleRadius)}:${step}`,pending=[...mapWorkerPending.values()].find(job=>job.target===target);
+  const snapshotRadius=clamp(Math.max(visibleRadius+24,96),96,444),grid=Math.ceil((snapshotRadius*2+1)/step),bx=mapCenterForRaster(centerX),bz=mapCenterForRaster(centerZ),key=`${target}:${SEED}:${bx}:${bz}:${Math.round(visibleRadius)}:${step}`,pending=[...mapWorkerPending.values()].find(job=>job.target===target);
   if(pending){if(pending.key===key)return;const drift=Math.max(Math.abs(bx-pending.centerX),Math.abs(bz-pending.centerZ));if(pending.step===step&&drift<24)return;mapWorkerPending.delete(pending.id);}
   const id=++mapWorkerRequestId,version=mapDataVersion,materials={water:ID_WATER,lava:ID_LAVA,grass:BID.grass,sand:BID.sand,snow:BID.snow,stone:BID.stone},palette=[];
   for(let i=0;i<BLOCKS.length;i++)palette[i]=mapTopColor(i).slice(0,3);
@@ -3695,7 +3780,7 @@ function queueLocalMapSnapshot(visibleRadius,step,centerX=player.pos.x,centerZ=p
   if(mapWorker){ queueWorkerMapSnapshot(visibleRadius,step,centerX,centerZ,target); return; }
   const snapshotRadius=clamp(Math.max(visibleRadius+24,96),96,444);
   const grid=Math.ceil((snapshotRadius*2+1)/step);
-  const bx=Math.floor(centerX), bz=Math.floor(centerZ), key=`${target}:${bx}:${bz}:${Math.round(visibleRadius)}:${step}`;
+  const bx=mapCenterForRaster(centerX), bz=mapCenterForRaster(centerZ), key=`${target}:${SEED}:${bx}:${bz}:${Math.round(visibleRadius)}:${step}`;
   if(mapRenderJob){
     if(mapRenderJob.key===key) return;
     const sameTarget=mapRenderJob.target===target, drift=Math.max(Math.abs(bx-mapRenderJob.centerX),Math.abs(bz-mapRenderJob.centerZ));
@@ -3771,11 +3856,12 @@ function applyServerMapRaster(data,target='mini',version=mapDataVersion,requestK
 }
 function requestServerMapSnapshot(visibleRadius,step,centerX=player.pos.x,centerZ=player.pos.z,target='mini'){
   if(!canUseServerMap()) return;
-  centerX=Math.floor(centerX); centerZ=Math.floor(centerZ); serverMapRequestTarget=target;
+  centerX=mapCenterForRaster(centerX); centerZ=mapCenterForRaster(centerZ); serverMapRequestTarget=target;
   const key=`${target}:${SEED}:${centerX}:${centerZ}:${Math.round(visibleRadius)}:${step}`;
   if(serverMapFetch[target]||serverMapKey[target]===key) return;
   serverMapKey[target]=key; const version=mapDataVersion;
-  const url=`/api/map?x=${centerX}&z=${centerZ}&radius=${Math.round(visibleRadius)}&step=${step}`;
+  const coarse=window.__SERVER_DEPLOYMENT__===true?'&coarse=1':'';
+  const url=`/api/map?x=${centerX}&z=${centerZ}&radius=${Math.round(visibleRadius)}&step=${step}${coarse}`;
   serverMapFetch[target]=fetch(url,{cache:'no-store'}).then(r=>{if(!r.ok)throw new Error('Server map unavailable');return r.json();}).then(data=>applyServerMapRaster(data,target,version,key)).catch(error=>{ serverMapKey[target]=''; serverMapFailed=true; console.warn(error); }).finally(()=>{serverMapFetch[target]=null;});
 }
 function ensureMapSnapshot(visibleRadius,step,centerX=player.pos.x,centerZ=player.pos.z,full=false){
@@ -3852,7 +3938,9 @@ function updateWorldMaps(now){
   // Keep the Full Map YOU marker live while the map is open, even between
   // terrain refreshes. This also keeps the edge arrow accurate after motion.
   updateFullMapPlayerMarker();
-  if(now-mapLastDraw<(settings.mapInterval||520)) return;
+  const mapSpeed=Math.hypot(player.vel.x,player.vel.z);
+  const refreshInterval=Math.max(settings.mapInterval||520,window.__SERVER_DEPLOYMENT__===true&&mapSpeed>8?1200:0);
+  if(now-mapLastDraw<refreshInterval) return;
   mapLastDraw=now;
   const radius=dynamicMapRadius();
   drawWorldMap(miniMap,radius*MINI_MAP_OVERSCAN);
@@ -4444,6 +4532,7 @@ function frame(){
   }
 
   if(started) updateChunks(paused?12:8);
+  if(started) flushDeferredChunkMeshes(paused?4:3);
   if(started && !paused) updateLocalCreatures(dt);
   if(started){ multiplayer.tick(dt,paused); updateRemotePlayersRender(dt); updateAmbientEntitiesRender(dt); updateWorldMaps(now); updateClaimWorldVisuals(); }
 
@@ -4453,9 +4542,11 @@ function frame(){
   if(debugOn && debugTimer>0.35){
     debugTimer=0;
     let tris=0; chunks.forEach(c=>{ if(c.mesh) tris+=c.mesh.geometry.index.count/3; if(c.alpha) tris+=c.alpha.geometry.index.count/3; });
+    const wsAge=multiplayer.lastMessageAt?((performance.now()-multiplayer.lastMessageAt)/1000).toFixed(1)+'s':'—';
     hudDebug.innerHTML=
       `<b>VOXELCRAFT</b><br>FPS ${fps}<br>XYZ ${player.pos.x.toFixed(1)} / ${player.pos.y.toFixed(1)} / ${player.pos.z.toFixed(1)}<br>`+
       `Chunks ${chunks.size} · Queue ${loadQueue.length}<br>Tris ${(tris/1000).toFixed(1)}k · Particles ${pCount}<br>`+
+      `WS ${multiplayer.connected?Math.round(multiplayer.ping)+'ms':'offline'} · last msg ${wsAge} · Edit server ${multiplayer.lastEditServerMs.toFixed(1)}ms<br>`+
       `Time ${(dayTime*24).toFixed(1)}h · RD ${settings.rd}`;
   }
 
@@ -4554,6 +4645,12 @@ if(SERVER_DEPLOYMENT){
   }
   setTimeout(beginRememberedServerSession,100);
 }
+</script>
+</body>
+</html>
+>
+</html>
+;
 </script>
 </body>
 </html>
