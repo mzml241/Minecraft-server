@@ -1,7 +1,109 @@
 {
   "format": "voxelcraft-database",
   "version": 1,
-  "updatedAt": "2026-09-01T03:04:35.586Z",
-  "accounts": {},
-  "profiles": {}
+  "updatedAt": "2026-09-01T17:54:06.227Z",
+  "accounts": {
+    "hero_68347": {
+      "username": "hero_68347",
+      "playerId": "u_8a5996672f94e3b1",
+      "passwordHash": "50c3bbb3aac28e9a92c82ff429605760b82e3d0151e3008d3008835bd628275f",
+      "passwordSalt": "1c17697abbd105e81f9aa93102d313b0",
+      "name": "Hero_68347",
+      "createdAt": "2026-09-01T14:17:08.848Z",
+      "lastSeen": "2026-09-01T14:17:08.850Z"
+    },
+    "hero_6340": {
+      "username": "hero_6340",
+      "playerId": "u_4cb8f78e52693ff9",
+      "passwordHash": "8d99b32cb3a6b327e84a95855b95e52d158668fc682fe42e9638beb616dbd6dc",
+      "passwordSalt": "233faaf8d6b17a8024b6d5eb5c474790",
+      "name": "Hero_6340",
+      "createdAt": "2026-09-01T14:17:20.832Z",
+      "lastSeen": "2026-09-01T14:17:20.833Z"
+    },
+    "mozamml1234": {
+      "username": "mozamml1234",
+      "playerId": "u_5d6a747c4a414c87",
+      "passwordHash": "8267fe018eb561b775e3c0f78caffd9247119bc8ce3ea101d3f1858de31832f5",
+      "passwordSalt": "ac823fc864fabce54dc626420a83ccdd",
+      "name": "mozamml",
+      "createdAt": "2026-09-01T17:45:39.432Z",
+      "lastSeen": "2026-09-01T17:49:51.505Z"
+    },
+    "claimtester_3381": {
+      "username": "claimtester_3381",
+      "playerId": "u_93dfa482ba191af8",
+      "passwordHash": "ee1cfaf2a651532551f7543db2b90345d1af2c9da3504dcb9679ef04d776b23b",
+      "passwordSalt": "66e317ed662c727ab6e952738da113e0",
+      "name": "ClaimTester_3381",
+      "createdAt": "2026-09-01T17:52:50.188Z",
+      "lastSeen": "2026-09-01T17:52:50.192Z"
+    },
+    "claimtester_5236": {
+      "username": "claimtester_5236",
+      "playerId": "u_0fe03cdd98b05c02",
+      "passwordHash": "51a95e1ad5311c89d7ae863777ce4b5711a86e97392eda2655d268ec5b5ad534",
+      "passwordSalt": "4cda6d1b359743455e27c2421264d3b3",
+      "name": "ClaimTester_5236",
+      "createdAt": "2026-09-01T17:53:21.200Z",
+      "lastSeen": "2026-09-01T17:53:21.204Z"
+    }
+  },
+  "profiles": {
+    "account:hero_68347": {
+      "id": "u_8a5996672f94e3b1",
+      "name": "Hero_68347",
+      "createdAt": "2026-09-01T14:17:08.848Z",
+      "lastSeen": null,
+      "wallet": {
+        "balance": 0,
+        "updatedAt": null
+      },
+      "hasClaimedFree": false
+    },
+    "account:hero_6340": {
+      "id": "u_4cb8f78e52693ff9",
+      "name": "Hero_6340",
+      "createdAt": "2026-09-01T14:17:20.832Z",
+      "lastSeen": null,
+      "wallet": {
+        "balance": 0,
+        "updatedAt": null
+      },
+      "hasClaimedFree": false
+    },
+    "account:mozamml1234": {
+      "id": "u_5d6a747c4a414c87",
+      "name": "mozamml",
+      "createdAt": "2026-09-01T17:45:39.432Z",
+      "lastSeen": null,
+      "wallet": {
+        "balance": 0,
+        "updatedAt": null
+      },
+      "hasClaimedFree": true
+    },
+    "account:claimtester_3381": {
+      "id": "u_93dfa482ba191af8",
+      "name": "ClaimTester_3381",
+      "createdAt": "2026-09-01T17:52:50.188Z",
+      "lastSeen": null,
+      "wallet": {
+        "balance": 0,
+        "updatedAt": null
+      },
+      "hasClaimedFree": false
+    },
+    "account:claimtester_5236": {
+      "id": "u_0fe03cdd98b05c02",
+      "name": "ClaimTester_5236",
+      "createdAt": "2026-09-01T17:53:21.200Z",
+      "lastSeen": null,
+      "wallet": {
+        "balance": 0,
+        "updatedAt": null
+      },
+      "hasClaimedFree": true
+    }
+  }
 }

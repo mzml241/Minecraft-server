@@ -139,6 +139,112 @@ function profileKeyValid(value){ return !!safeIdentity(value)||/^account:[a-z0-9
 function readJsonFile(filePath,fallback=null){
   try{return fs.existsSync(filePath)?JSON.parse(fs.readFileSync(filePath,'utf8')):fallback;}catch(error){log('JSON load failed:',path.basename(filePath),error.message);return fallback;}
 }
+const { DatabaseSync } = require('node:sqlite');
+const SQLITE_DB_PATH = path.join(DATA_DIR, 'voxelcraft.sqlite');
+let sqliteDb = null;
+let stmtUpsertAccount = null;
+let stmtUpsertProfile = null;
+let stmtInsertLedger = null;
+let stmtUpsertReservation = null;
+let stmtDeleteReservation = null;
+
+function initSqliteDatabase() {
+  try {
+    sqliteDb = new DatabaseSync(SQLITE_DB_PATH);
+    sqliteDb.exec('PRAGMA journal_mode = WAL;');
+    sqliteDb.exec('PRAGMA synchronous = NORMAL;');
+    sqliteDb.exec(`
+      CREATE TABLE IF NOT EXISTS accounts (
+        username TEXT PRIMARY KEY,
+        player_id TEXT UNIQUE,
+        password_hash TEXT,
+        password_salt TEXT,
+        name TEXT,
+        created_at TEXT,
+        last_seen TEXT
+      );
+      CREATE TABLE IF NOT EXISTS profiles (
+        id TEXT PRIMARY KEY,
+        identity_key TEXT UNIQUE,
+        name TEXT,
+        wallet_balance INTEGER DEFAULT 0,
+        wallet_updated_at TEXT,
+        has_claimed_free INTEGER DEFAULT 0,
+        created_at TEXT,
+        last_seen TEXT
+      );
+      CREATE TABLE IF NOT EXISTS coin_ledger (
+        id TEXT PRIMARY KEY,
+        player_id TEXT,
+        delta INTEGER,
+        balance_after INTEGER,
+        type TEXT,
+        reason TEXT,
+        property_id TEXT,
+        business_id TEXT,
+        created_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_ledger_player ON coin_ledger (player_id);
+      CREATE TABLE IF NOT EXISTS spawn_reservations (
+        identity_key TEXT,
+        world_id TEXT,
+        x REAL,
+        y REAL,
+        z REAL,
+        player_id TEXT,
+        reserved_at INTEGER,
+        expires_at INTEGER,
+        PRIMARY KEY (identity_key, world_id)
+      );
+    `);
+
+    stmtUpsertAccount = sqliteDb.prepare(`
+      INSERT INTO accounts (username, player_id, password_hash, password_salt, name, created_at, last_seen)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(username) DO UPDATE SET
+        player_id=excluded.player_id,
+        password_hash=excluded.password_hash,
+        password_salt=excluded.password_salt,
+        name=excluded.name,
+        last_seen=excluded.last_seen
+    `);
+
+    stmtUpsertProfile = sqliteDb.prepare(`
+      INSERT INTO profiles (id, identity_key, name, wallet_balance, wallet_updated_at, has_claimed_free, created_at, last_seen)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        identity_key=excluded.identity_key,
+        name=excluded.name,
+        wallet_balance=excluded.wallet_balance,
+        wallet_updated_at=excluded.wallet_updated_at,
+        has_claimed_free=excluded.has_claimed_free,
+        last_seen=excluded.last_seen
+    `);
+
+    stmtInsertLedger = sqliteDb.prepare(`
+      INSERT OR IGNORE INTO coin_ledger (id, player_id, delta, balance_after, type, reason, property_id, business_id, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    stmtUpsertReservation = sqliteDb.prepare(`
+      INSERT INTO spawn_reservations (identity_key, world_id, x, y, z, player_id, reserved_at, expires_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(identity_key, world_id) DO UPDATE SET
+        x=excluded.x, y=excluded.y, z=excluded.z, player_id=excluded.player_id,
+        reserved_at=excluded.reserved_at, expires_at=excluded.expires_at
+    `);
+
+    stmtDeleteReservation = sqliteDb.prepare(`
+      DELETE FROM spawn_reservations WHERE identity_key = ? AND world_id = ?
+    `);
+
+    log('SQLite database initialized at', path.basename(SQLITE_DB_PATH));
+  } catch (error) {
+    log('SQLite initialization warning:', error.message);
+    sqliteDb = null;
+  }
+}
+
 function databaseSnapshot(){return {format:'voxelcraft-database',version:1,updatedAt:new Date().toISOString(),accounts:Object.fromEntries(accounts),profiles:Object.fromEntries(playerProfiles)};}
 function saveDatabase(){
   try{const tmp=`${DATABASE_PATH}.tmp`;fs.writeFileSync(tmp,JSON.stringify(databaseSnapshot(),null,2));fs.renameSync(tmp,DATABASE_PATH);return true;}
@@ -146,22 +252,49 @@ function saveDatabase(){
 }
 function databaseSection(section,legacyPath,key){
   const database=readJsonFile(DATABASE_PATH,null),legacy=readJsonFile(legacyPath,null),fromDatabase=database&&database[section]&&typeof database[section]==='object'?database[section]:null,fromLegacy=legacy&&legacy[key]&&typeof legacy[key]==='object'?legacy[key]:{};
-  // One-time migration: if the new database is still empty but legacy data exists, keep the legacy records.
   return fromDatabase&&Object.keys(fromDatabase).length?fromDatabase:fromLegacy;
 }
 function loadAccounts(){
   accounts.clear();
   try{
+    if (sqliteDb) {
+      const rows = sqliteDb.prepare('SELECT * FROM accounts').all();
+      if (rows.length > 0) {
+        for (const r of rows) {
+          accounts.set(r.username, {
+            username: r.username,
+            playerId: r.player_id,
+            passwordHash: r.password_hash,
+            passwordSalt: r.password_salt,
+            name: r.name,
+            createdAt: r.created_at,
+            lastSeen: r.last_seen
+          });
+        }
+        return;
+      }
+    }
     const raw=databaseSection('accounts',ACCOUNT_PATH,'accounts');
     for(const [key,item] of Object.entries(raw)){
       const username=safeUsername(item?.username||key);
       if(!username||!item||typeof item!=='object'||!/^u_[a-f0-9]{12,32}$/.test(String(item.playerId||''))||typeof item.passwordHash!=='string'||typeof item.passwordSalt!=='string')continue;
-      accounts.set(username,{username,playerId:String(item.playerId),passwordHash:String(item.passwordHash),passwordSalt:String(item.passwordSalt),name:safeName(item.name||username),createdAt:item.createdAt||null,lastSeen:item.lastSeen||null});
+      const acc = {username,playerId:String(item.playerId),passwordHash:String(item.passwordHash),passwordSalt:String(item.passwordSalt),name:safeName(item.name||username),createdAt:item.createdAt||null,lastSeen:item.lastSeen||null};
+      accounts.set(username, acc);
+      if (stmtUpsertAccount) {
+        try { stmtUpsertAccount.run(acc.username, acc.playerId, acc.passwordHash, acc.passwordSalt, acc.name, acc.createdAt, acc.lastSeen); } catch (e) {}
+      }
     }
   }catch(error){log('Account load failed:',error.message);}
 }
 function saveAccounts(){
-  try{fs.writeFileSync(ACCOUNT_PATH,JSON.stringify({format:'voxelcraft-accounts',version:1,accounts:Object.fromEntries(accounts)},null,2));saveDatabase();return true;}
+  try{
+    if (stmtUpsertAccount) {
+      for (const acc of accounts.values()) {
+        stmtUpsertAccount.run(acc.username, acc.playerId, acc.passwordHash, acc.passwordSalt, acc.name, acc.createdAt, acc.lastSeen);
+      }
+    }
+    fs.writeFileSync(ACCOUNT_PATH,JSON.stringify({format:'voxelcraft-accounts',version:1,accounts:Object.fromEntries(accounts)},null,2));saveDatabase();return true;
+  }
   catch(error){log('Account save failed:',error.message);return false;}
 }
 function passwordDigest(password,salt){return crypto.pbkdf2Sync(String(password),salt,120000,32,'sha256').toString('hex');}
@@ -176,7 +309,15 @@ function accountProfile(account,name){
 function authenticateAccount(rawUsername,rawPassword,displayName){
   const username=safeUsername(rawUsername),password=String(rawPassword||'');if(!username)return {ok:false,reason:'invalid_username',message:'Username must be 3–24 letters, numbers or underscores'};if(password.length<6)return {ok:false,reason:'invalid_password',message:'Password must contain at least 6 characters'};
   let account=accounts.get(username),created=false;
-  if(!account){const salt=crypto.randomBytes(16).toString('hex');account={username,playerId:`u_${crypto.randomBytes(8).toString('hex')}`,passwordHash:passwordDigest(password,salt),passwordSalt:salt,name:safeName(displayName||username),createdAt:new Date().toISOString(),lastSeen:null};accounts.set(username,account);created=true;}
+  if(!account){
+    const salt=crypto.randomBytes(16).toString('hex');
+    account={username,playerId:`u_${crypto.randomBytes(8).toString('hex')}`,passwordHash:passwordDigest(password,salt),passwordSalt:salt,name:safeName(displayName||username),createdAt:new Date().toISOString(),lastSeen:null};
+    accounts.set(username,account);
+    if (stmtUpsertAccount) {
+      try { stmtUpsertAccount.run(account.username, account.playerId, account.passwordHash, account.passwordSalt, account.name, account.createdAt, account.lastSeen); } catch (e) {}
+    }
+    created=true;
+  }
   else {const actual=Buffer.from(passwordDigest(password,account.passwordSalt),'hex'),expected=Buffer.from(account.passwordHash,'hex');if(actual.length!==expected.length||!crypto.timingSafeEqual(actual,expected))return {ok:false,reason:'invalid_credentials',message:'Username or password is incorrect'};}
   return {ok:true,created,account,...accountProfile(account)};
 }
@@ -212,18 +353,43 @@ function authenticateRememberedSession(rawUsername,rawToken){
 function loadPlayerProfiles() {
   playerProfiles.clear();
   try {
+    if (sqliteDb) {
+      const rows = sqliteDb.prepare('SELECT * FROM profiles').all();
+      if (rows.length > 0) {
+        for (const r of rows) {
+          playerProfiles.set(r.identity_key, {
+            id: r.id,
+            name: r.name,
+            createdAt: r.created_at,
+            lastSeen: r.last_seen,
+            wallet: { balance: r.wallet_balance || 0, updatedAt: r.wallet_updated_at || null },
+            hasClaimedFree: Boolean(r.has_claimed_free)
+          });
+        }
+        return;
+      }
+    }
     const profiles=databaseSection('profiles',PLAYER_PROFILE_PATH,'profiles');
     for(const [identity,profile] of Object.entries(profiles)){
       if(!profileKeyValid(identity)||!profile||typeof profile!=='object') continue;
       if(!/^u_[a-f0-9]{12,32}$/.test(String(profile.id||''))) continue;
       const rawBalance=Number(profile.wallet?.balance ?? profile.walletBalance ?? 0);
-      playerProfiles.set(identity,{id:String(profile.id),name:safeName(profile.name),createdAt:profile.createdAt||null,lastSeen:profile.lastSeen||null,wallet:{balance:Number.isFinite(rawBalance)&&rawBalance>=0?Math.floor(rawBalance):0,updatedAt:profile.wallet?.updatedAt||null},hasClaimedFree:profile.hasClaimedFree===true});
+      const prof = {id:String(profile.id),name:safeName(profile.name),createdAt:profile.createdAt||null,lastSeen:profile.lastSeen||null,wallet:{balance:Number.isFinite(rawBalance)&&rawBalance>=0?Math.floor(rawBalance):0,updatedAt:profile.wallet?.updatedAt||null},hasClaimedFree:profile.hasClaimedFree===true};
+      playerProfiles.set(identity, prof);
+      if (stmtUpsertProfile) {
+        try { stmtUpsertProfile.run(prof.id, identity, prof.name, prof.wallet.balance, prof.wallet.updatedAt, prof.hasClaimedFree ? 1 : 0, prof.createdAt, prof.lastSeen); } catch (e) {}
+      }
     }
   } catch(error) { log('Player profile load failed:',error.message); }
 }
 
 function savePlayerProfiles() {
   try {
+    if (stmtUpsertProfile) {
+      for (const [identity, prof] of playerProfiles.entries()) {
+        stmtUpsertProfile.run(prof.id, identity, prof.name, prof.wallet.balance, prof.wallet.updatedAt, prof.hasClaimedFree ? 1 : 0, prof.createdAt, prof.lastSeen);
+      }
+    }
     const profiles=Object.fromEntries(playerProfiles);
     fs.writeFileSync(PLAYER_PROFILE_PATH,JSON.stringify({format:'voxelcraft-player-profiles',version:1,profiles},null,2));
     saveDatabase();
@@ -233,13 +399,36 @@ function savePlayerProfiles() {
 function loadCoinLedger(){
   coinLedger=[];
   try{
+    if (sqliteDb) {
+      const rows = sqliteDb.prepare('SELECT * FROM coin_ledger ORDER BY rowid ASC').all();
+      if (rows.length > 0) {
+        for (const r of rows) {
+          coinLedger.push({
+            id: r.id,
+            playerId: r.player_id,
+            delta: r.delta,
+            balanceAfter: r.balance_after,
+            type: r.type,
+            reason: r.reason,
+            propertyId: r.property_id,
+            businessId: r.business_id,
+            createdAt: r.created_at
+          });
+        }
+        return;
+      }
+    }
     if(!fs.existsSync(LEDGER_PATH)) return;
     const data=JSON.parse(fs.readFileSync(LEDGER_PATH,'utf8')),rows=Array.isArray(data?.transactions)?data.transactions:[];
     for(const row of rows){
       if(!row||typeof row!=='object'||(!/^u_[a-f0-9]{12,32}$/.test(String(row.playerId||''))&&row.playerId!=='system_market')) continue;
       const delta=Math.trunc(Number(row.delta)),balanceAfter=Math.trunc(Number(row.balanceAfter));
       if(!Number.isFinite(delta)||!Number.isFinite(balanceAfter)||!delta) continue;
-      coinLedger.push({id:String(row.id||`tx_${crypto.randomBytes(8).toString('hex')}`),playerId:String(row.playerId),delta,balanceAfter,type:String(row.type||'unknown').slice(0,40),reason:String(row.reason||'').slice(0,160),propertyId:row.propertyId?String(row.propertyId).slice(0,80):null,listingId:row.listingId?String(row.listingId).slice(0,80):null,businessId:row.businessId?String(row.businessId).slice(0,80):null,createdAt:row.createdAt||null});
+      const tx = {id:String(row.id||`tx_${crypto.randomBytes(8).toString('hex')}`),playerId:String(row.playerId),delta,balanceAfter,type:String(row.type||'unknown').slice(0,40),reason:String(row.reason||'').slice(0,160),propertyId:row.propertyId?String(row.propertyId).slice(0,80):null,listingId:row.listingId?String(row.listingId).slice(0,80):null,businessId:row.businessId?String(row.businessId).slice(0,80):null,createdAt:row.createdAt||null};
+      coinLedger.push(tx);
+      if (stmtInsertLedger) {
+        try { stmtInsertLedger.run(tx.id, tx.playerId, tx.delta, tx.balanceAfter, tx.type, tx.reason, tx.propertyId, tx.businessId, tx.createdAt); } catch (e) {}
+      }
     }
   }catch(error){ log('Coin ledger load failed:',error.message); }
 }
@@ -259,13 +448,39 @@ function commitCoinTransaction({playerId,delta,type,reason,propertyId=null,busin
   const current=Math.max(0,Math.floor(Number(profile.wallet.balance)||0)),next=current+amount;
   if(next<0) return {ok:false,reason:'insufficient_funds',balance:current};
   const now=new Date().toISOString(),tx={id:`tx_${crypto.randomBytes(8).toString('hex')}`,playerId:String(playerId),delta:amount,balanceAfter:next,type:String(type||'unknown').slice(0,40),reason:String(reason||'').slice(0,160),propertyId:propertyId?String(propertyId).slice(0,80):null,businessId:businessId?String(businessId).slice(0,80):null,createdAt:now};
-  profile.wallet={balance:next,updatedAt:now}; coinLedger.push(tx); savePlayerProfiles(); saveCoinLedger();
+  profile.wallet={balance:next,updatedAt:now}; coinLedger.push(tx);
+  if (stmtInsertLedger) {
+    try { stmtInsertLedger.run(tx.id, tx.playerId, tx.delta, tx.balanceAfter, tx.type, tx.reason, tx.propertyId, tx.businessId, tx.createdAt); } catch (e) {}
+  }
+  if (stmtUpsertProfile) {
+    const ident = `account:${profile.name.toLowerCase()}`;
+    try { stmtUpsertProfile.run(profile.id, ident, profile.name, profile.wallet.balance, profile.wallet.updatedAt, profile.hasClaimedFree ? 1 : 0, profile.createdAt, profile.lastSeen); } catch (e) {}
+  }
+  savePlayerProfiles(); saveCoinLedger();
   return {ok:true,tx,wallet:walletSnapshot(playerId)};
 }
 
 function loadSpawnReservations() {
   spawnReservations.clear();
   try {
+    if (sqliteDb) {
+      const now = Date.now();
+      const rows = sqliteDb.prepare('SELECT * FROM spawn_reservations WHERE expires_at > ?').all(now);
+      if (rows.length > 0) {
+        for (const r of rows) {
+          spawnReservations.set(r.identity_key, {
+            worldId: safeWorldId(r.world_id || 'main'),
+            x: r.x,
+            y: r.y,
+            z: r.z,
+            playerId: String(r.player_id || ''),
+            reservedAt: r.reserved_at,
+            expiresAt: r.expires_at
+          });
+        }
+        return;
+      }
+    }
     if(!fs.existsSync(SPAWN_RESERVATION_PATH)) return;
     const data=JSON.parse(fs.readFileSync(SPAWN_RESERVATION_PATH,'utf8'));
     const reservations=data&&data.reservations&&typeof data.reservations==='object'?data.reservations:{};
@@ -274,13 +489,22 @@ function loadSpawnReservations() {
       if(!profileKeyValid(identity)||!reservation||typeof reservation!=='object') continue;
       const x=Number(reservation.x),y=Number(reservation.y),z=Number(reservation.z),expiresAt=Number(reservation.expiresAt);
       if(![x,y,z,expiresAt].every(Number.isFinite)||expiresAt<=now) continue;
-      spawnReservations.set(identity,{worldId:safeWorldId(reservation.worldId||'main'),x,y,z,playerId:String(reservation.playerId||''),reservedAt:reservation.reservedAt||null,expiresAt});
+      const resObj = {worldId:safeWorldId(reservation.worldId||'main'),x,y,z,playerId:String(reservation.playerId||''),reservedAt:reservation.reservedAt||null,expiresAt};
+      spawnReservations.set(identity, resObj);
+      if (stmtUpsertReservation) {
+        try { stmtUpsertReservation.run(identity, resObj.worldId, resObj.x, resObj.y, resObj.z, resObj.playerId, resObj.reservedAt, resObj.expiresAt); } catch (e) {}
+      }
     }
   } catch(error) { log('Spawn reservation load failed:',error.message); }
 }
 
 function saveSpawnReservations() {
   try {
+    if (stmtUpsertReservation) {
+      for (const [identity, resObj] of spawnReservations.entries()) {
+        stmtUpsertReservation.run(identity, resObj.worldId, resObj.x, resObj.y, resObj.z, resObj.playerId, resObj.reservedAt, resObj.expiresAt);
+      }
+    }
     fs.writeFileSync(SPAWN_RESERVATION_PATH,JSON.stringify({format:'voxelcraft-spawn-reservations',version:1,reservations:Object.fromEntries(spawnReservations)},null,2));
   } catch(error) { log('Spawn reservation save failed:',error.message); }
 }
@@ -288,7 +512,13 @@ function saveSpawnReservations() {
 function pruneSpawnReservations() {
   const now=Date.now(); let changed=false;
   for(const [identity,reservation] of spawnReservations){
-    if(!reservation||Number(reservation.expiresAt)<=now){ spawnReservations.delete(identity); changed=true; }
+    if(!reservation||Number(reservation.expiresAt)<=now){
+      spawnReservations.delete(identity);
+      if (stmtDeleteReservation) {
+        try { stmtDeleteReservation.run(identity, reservation?.worldId || 'main'); } catch (e) {}
+      }
+      changed=true;
+    }
   }
   if(changed) saveSpawnReservations();
 }
@@ -648,11 +878,7 @@ function serverMapNoise(){
   return {a:mapNoiseA,b:mapNoiseB,c:mapNoiseC};
 }
 function serverSmoothstep(e0,e1,x){ const t=Math.max(0,Math.min(1,(x-e0)/(e1-e0))); return t*t*(3-2*t); }
-let serverTerrainCacheSeed=null,serverTerrainCache=new Map();
 function serverMapColumn(x,z){
-  x=Math.floor(x); z=Math.floor(z);
-  if(serverTerrainCacheSeed!==world.seed){serverTerrainCacheSeed=world.seed;serverTerrainCache=new Map();}
-  const key=x+','+z,cached=serverTerrainCache.get(key); if(cached)return cached;
   const n=serverMapNoise();
   const cont=n.a.fbm2(x*.0015,z*.0015,4);
   const hills=n.a.fbm2(x*.011+13.3,z*.011-7.7,3);
@@ -673,7 +899,7 @@ function serverMapColumn(x,z){
   else if(temp<-.30) biome='snowy';
   else if(humid>.17) biome='forest';
   else biome='plains';
-  const result={h,biome}; serverTerrainCache.set(key,result); if(serverTerrainCache.size>100000)serverTerrainCache.delete(serverTerrainCache.keys().next().value); return result;
+  return {h,biome};
 }
 function serverH2(x,z,salt){
   let h=Math.imul(x,0x27d4eb2d)^Math.imul(z,0x165667b1)^Math.imul(salt,0x9e3779b1); h^=h>>>15; h=Math.imul(h,0x85ebca6b); h^=h>>>13; h=Math.imul(h,0xc2b2ae35); h^=h>>>16; return (h>>>0)/4294967296;
@@ -741,20 +967,155 @@ function serverMapColumnWithEdits(x,z,terrain,cabin,editColumns){
   }
   return base;
 }
-let serverMapRasterCache=new Map();
+const MASTER_MAP_MIN = -512;
+const MASTER_MAP_MAX = 512;
+const MASTER_MAP_SPAN = MASTER_MAP_MAX - MASTER_MAP_MIN; // 1024
+const MASTER_MAP_STEP = 2;
+const MASTER_MAP_GRID = Math.floor(MASTER_MAP_SPAN / MASTER_MAP_STEP) + 1; // 513
+const MAP_SYNC_INTERVAL_MS = Math.max(10000, Number(process.env.MAP_SYNC_INTERVAL_MS || 10 * 60 * 1000)); // 10 minutes
+
+let masterMapCache = {
+  worldId: null,
+  seed: null,
+  pixels: null,
+  columns: null,
+  markers: []
+};
+const dirtyMapLocations = new Set();
+
+function computeMapColumnPixel(c, west, east, north, south) {
+  const relief = ((west.h - east.h) + (north.h - south.h)) * .018;
+  const light = Math.max(.40, Math.min(1.24, .84 + (c.h - 30) * .009 + relief));
+  const rgb = serverMapRGB(c, c.id);
+  return [
+    Math.max(0, Math.min(255, Math.round(rgb[0] * light))),
+    Math.max(0, Math.min(255, Math.round(rgb[1] * light))),
+    Math.max(0, Math.min(255, Math.round(rgb[2] * light)))
+  ];
+}
+
+function bakeMasterMapCache(force = false) {
+  if (!force && masterMapCache.pixels && masterMapCache.worldId === world.id && masterMapCache.seed === world.seed) return;
+  const t0 = Date.now();
+  const grid = MASTER_MAP_GRID, editColumns = serverMapEditColumns(), cabinCache = new Map();
+  const columns = new Array(grid * grid);
+
+  for (let gz = 0; gz < grid; gz++) {
+    const z = MASTER_MAP_MIN + gz * MASTER_MAP_STEP;
+    for (let gx = 0; gx < grid; gx++) {
+      const x = MASTER_MAP_MIN + gx * MASTER_MAP_STEP;
+      const terrain = serverMapColumn(x, z), cabin = serverCabinRoof(x, z, terrain, cabinCache);
+      columns[gz * grid + gx] = serverMapColumnWithEdits(x, z, terrain, cabin, editColumns);
+    }
+  }
+
+  const pixels = Buffer.alloc(grid * grid * 3);
+  for (let gz = 0; gz < grid; gz++) {
+    for (let gx = 0; gx < grid; gx++) {
+      const c = columns[gz * grid + gx];
+      const west = columns[gz * grid + Math.max(0, gx - 1)];
+      const east = columns[gz * grid + Math.min(grid - 1, gx + 1)];
+      const north = columns[Math.max(0, gz - 1) * grid + gx];
+      const south = columns[Math.min(grid - 1, gz + 1) * grid + gx];
+      const rgb = computeMapColumnPixel(c, west, east, north, south);
+      const p = (gz * grid + gx) * 3;
+      pixels[p] = rgb[0];
+      pixels[p + 1] = rgb[1];
+      pixels[p + 2] = rgb[2];
+    }
+  }
+
+  const markers = [];
+  for (const [key, spec] of cabinCache) {
+    if (!spec) continue;
+    const [cx, cz] = key.split(',').map(Number);
+    markers.push({ type: 'cabin', x: cx * 16 + 7.5, z: cz * 16 + 7.5 });
+  }
+
+  masterMapCache = {
+    worldId: world.id,
+    seed: world.seed,
+    pixels,
+    columns,
+    markers
+  };
+  dirtyMapLocations.clear();
+  log(`Baked master world map cache (1024×1024 span, ${grid}×${grid}) in ${Date.now() - t0}ms`);
+}
+
+function refreshMasterMapDeltas() {
+  if (!masterMapCache.pixels || !masterMapCache.columns || dirtyMapLocations.size === 0) return;
+  const grid = MASTER_MAP_GRID, editColumns = serverMapEditColumns(), cabinCache = new Map();
+  const updatedIndices = new Set();
+
+  for (const loc of dirtyMapLocations) {
+    const [x, z] = loc.split(',').map(Number);
+    if (x < MASTER_MAP_MIN || x > MASTER_MAP_MAX || z < MASTER_MAP_MIN || z > MASTER_MAP_MAX) continue;
+    const gx = Math.round((x - MASTER_MAP_MIN) / MASTER_MAP_STEP);
+    const gz = Math.round((z - MASTER_MAP_MIN) / MASTER_MAP_STEP);
+    if (gx >= 0 && gx < grid && gz >= 0 && gz < grid) {
+      const terrain = serverMapColumn(MASTER_MAP_MIN + gx * MASTER_MAP_STEP, MASTER_MAP_MIN + gz * MASTER_MAP_STEP);
+      const cabin = serverCabinRoof(MASTER_MAP_MIN + gx * MASTER_MAP_STEP, MASTER_MAP_MIN + gz * MASTER_MAP_STEP, terrain, cabinCache);
+      masterMapCache.columns[gz * grid + gx] = serverMapColumnWithEdits(MASTER_MAP_MIN + gx * MASTER_MAP_STEP, MASTER_MAP_MIN + gz * MASTER_MAP_STEP, terrain, cabin, editColumns);
+      for (let dz = -1; dz <= 1; dz++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          const nx = gx + dx, nz = gz + dz;
+          if (nx >= 0 && nx < grid && nz >= 0 && nz < grid) updatedIndices.add(nz * grid + nx);
+        }
+      }
+    }
+  }
+
+  for (const idx of updatedIndices) {
+    const gx = idx % grid, gz = Math.floor(idx / grid);
+    const c = masterMapCache.columns[idx];
+    const west = masterMapCache.columns[gz * grid + Math.max(0, gx - 1)];
+    const east = masterMapCache.columns[gz * grid + Math.min(grid - 1, gx + 1)];
+    const north = masterMapCache.columns[Math.max(0, gz - 1) * grid + gx];
+    const south = masterMapCache.columns[Math.min(grid - 1, gz + 1) * grid + gx];
+    const rgb = computeMapColumnPixel(c, west, east, north, south);
+    const p = idx * 3;
+    masterMapCache.pixels[p] = rgb[0];
+    masterMapCache.pixels[p + 1] = rgb[1];
+    masterMapCache.pixels[p + 2] = rgb[2];
+  }
+
+  const count = dirtyMapLocations.size;
+  dirtyMapLocations.clear();
+  log(`10-minute map delta sync: updated ${count} dirty locations (${updatedIndices.size} pixels refreshed)`);
+}
+
 function serverMapRaster(url){
-  // The public client marks low-priority map requests as coarse. Nearby
-  // coarse requests share a 16-block raster, avoiding a large synchronous
-  // noise raster every time a flying player moves by a few blocks.
-  const requestedCenterX=integer(url.searchParams.get('x'),0), requestedCenterZ=integer(url.searchParams.get('z'),0),coarse=url.searchParams.get('coarse')==='1';
-  const centerX=coarse?Math.round(requestedCenterX/16)*16:requestedCenterX, centerZ=coarse?Math.round(requestedCenterZ/16)*16:requestedCenterZ;
+  const centerX=integer(url.searchParams.get('x'),0), centerZ=integer(url.searchParams.get('z'),0);
   const visibleRadius=clamp(integer(url.searchParams.get('radius'),96),48,420);
   const requestedStep=Number(url.searchParams.get('step'));
   const step=requestedStep===4?4:(requestedStep===2?2:1);
-  const cacheKey=[world.id,world.seed,world.revision,centerX,centerZ,visibleRadius,step].join('|');
-  const cached=serverMapRasterCache.get(cacheKey); if(cached) return cached;
   const radius=Math.max(visibleRadius+24,96), baseX=centerX-radius, baseZ=centerZ-radius;
-  const grid=Math.ceil((radius*2+1)/step), editColumns=serverMapEditColumns(), cabinCache=new Map(), columns=new Array(grid*grid);
+  const grid=Math.ceil((radius*2+1)/step);
+
+  // Fast-path: Sub-sample directly from pre-baked Master Map Cache (0ms CPU noise!)
+  if(masterMapCache.pixels && masterMapCache.worldId===world.id && masterMapCache.seed===world.seed &&
+     baseX>=MASTER_MAP_MIN && baseX+(grid-1)*step<=MASTER_MAP_MAX &&
+     baseZ>=MASTER_MAP_MIN && baseZ+(grid-1)*step<=MASTER_MAP_MAX){
+    const subPixels=Buffer.alloc(grid*grid*3);
+    const mGrid=MASTER_MAP_GRID;
+    for(let gz=0;gz<grid;gz++){
+      const z=baseZ+gz*step;
+      const mgz=Math.max(0,Math.min(mGrid-1,Math.round((z-MASTER_MAP_MIN)/MASTER_MAP_STEP)));
+      for(let gx=0;gx<grid;gx++){
+        const x=baseX+gx*step;
+        const mgx=Math.max(0,Math.min(mGrid-1,Math.round((x-MASTER_MAP_MIN)/MASTER_MAP_STEP)));
+        const srcP=(mgz*mGrid+mgx)*3;
+        const dstP=(gz*grid+gx)*3;
+        subPixels[dstP]=masterMapCache.pixels[srcP];
+        subPixels[dstP+1]=masterMapCache.pixels[srcP+1];
+        subPixels[dstP+2]=masterMapCache.pixels[srcP+2];
+      }
+    }
+    return {type:'mapRaster',worldId:world.id,seed:world.seed,baseX,baseZ,radius,step,grid,colors:subPixels.toString('base64'),markers:masterMapCache.markers};
+  }
+
+  const editColumns=serverMapEditColumns(), cabinCache=new Map(), columns=new Array(grid*grid);
   for(let gz=0;gz<grid;gz++) for(let gx=0;gx<grid;gx++){
     const x=baseX+gx*step,z=baseZ+gz*step, terrain=serverMapColumn(x,z), cabin=serverCabinRoof(x,z,terrain,cabinCache);
     columns[gz*grid+gx]=serverMapColumnWithEdits(x,z,terrain,cabin,editColumns);
@@ -762,16 +1123,12 @@ function serverMapRaster(url){
   const pixels=Buffer.alloc(grid*grid*3);
   for(let gz=0;gz<grid;gz++) for(let gx=0;gx<grid;gx++){
     const c=columns[gz*grid+gx], west=columns[gz*grid+Math.max(0,gx-1)], east=columns[gz*grid+Math.min(grid-1,gx+1)], north=columns[Math.max(0,gz-1)*grid+gx], south=columns[Math.min(grid-1,gz+1)*grid+gx];
-    const relief=((west.h-east.h)+(north.h-south.h))*.018, light=Math.max(.40,Math.min(1.24,.84+(c.h-30)*.009+relief));
-    const rgb=serverMapRGB(c,c.id), p=(gz*grid+gx)*3;
-    pixels[p]=Math.max(0,Math.min(255,Math.round(rgb[0]*light))); pixels[p+1]=Math.max(0,Math.min(255,Math.round(rgb[1]*light))); pixels[p+2]=Math.max(0,Math.min(255,Math.round(rgb[2]*light)));
+    const rgb=computeMapColumnPixel(c,west,east,north,south), p=(gz*grid+gx)*3;
+    pixels[p]=rgb[0]; pixels[p+1]=rgb[1]; pixels[p+2]=rgb[2];
   }
   const markers=[];
   for(const [key,spec] of cabinCache){ if(!spec) continue; const [cx,cz]=key.split(',').map(Number); markers.push({type:'cabin',x:cx*16+7.5,z:cz*16+7.5}); }
-  const result={type:'mapRaster',worldId:world.id,seed:world.seed,baseX,baseZ,radius,step,grid,colors:pixels.toString('base64'),markers};
-  serverMapRasterCache.set(cacheKey,result);
-  if(serverMapRasterCache.size>24) serverMapRasterCache.delete(serverMapRasterCache.keys().next().value);
-  return result;
+  return {type:'mapRaster',worldId:world.id,seed:world.seed,baseX,baseZ,radius,step,grid,colors:pixels.toString('base64'),markers};
 }
 let serverEditTopRevision=-1, serverEditTopSeed=null, serverEditTopsCache=new Map(), serverEditIdsCache=new Map(), serverTopCache=new Map();
 function rebuildServerEditCaches(){
@@ -844,7 +1201,30 @@ function claimDetails(claim,viewerId) {
 }
 
 function claimsSummary() {
-  return world.claims.map(claim=>{ const land=landRegistryEntry(claim.x+PARCEL_SIZE/2,claim.z+PARCEL_SIZE/2); return {id:claim.id,ownerId:claim.ownerId,ownerName:claim.ownerName,kind:claim.kind||'player',npcPropertyId:claim.npcPropertyId||null,marketListingId:claim.marketListingId||null,marketLocked:claim.marketLocked===true,businessType:claim.businessLicense?.type||null,businessName:claim.businessLicense?.name||null,coOwnerCount:Array.isArray(claim.coOwners)?claim.coOwners.length:0,x:claim.x,z:claim.z,size:CLAIM_SIZE,landTier:land.locationTier,landPrice:land.price,createdAt:claim.createdAt,updatedAt:claim.updatedAt}; });
+  return world.claims.map(claim=>{
+    const land=landRegistryEntry(claim.x+PARCEL_SIZE/2,claim.z+PARCEL_SIZE/2);
+    return {
+      id:claim.id,
+      ownerId:claim.ownerId,
+      ownerName:claim.ownerName,
+      kind:claim.kind||'player',
+      npcPropertyId:claim.npcPropertyId||null,
+      marketListingId:claim.marketListingId||null,
+      marketLocked:claim.marketLocked===true,
+      businessType:claim.businessLicense?.type||null,
+      businessName:claim.businessLicense?.name||null,
+      coOwnerCount:Array.isArray(claim.coOwners)?claim.coOwners.length:0,
+      members:Array.isArray(claim.members)?claim.members.map(m=>({playerId:m.playerId,build:!!m.build,use:!!m.use})):[],
+      coOwners:Array.isArray(claim.coOwners)?claim.coOwners.map(c=>({playerId:c.playerId})):[],
+      x:claim.x,
+      z:claim.z,
+      size:CLAIM_SIZE,
+      landTier:land.locationTier,
+      landPrice:land.price,
+      createdAt:claim.createdAt,
+      updatedAt:claim.updatedAt
+    };
+  });
 }
 
 function claimPermissions(claim,playerId) {
@@ -1767,14 +2147,25 @@ function serverPlayerCollides(px,py,pz){
 function serverPlayerMotionValid(client,nx,ny,nz,now){
   if(![nx,ny,nz].every(Number.isFinite)||ny<-20||ny>1000) return false;
   const elapsed=Math.max(.05,Math.min(.8,(now-(client.lastStateAt||now))/1000));
-  const maxSpeed=client.mode==='creative'?16:8;
-  const maxDistance=maxSpeed*elapsed+2.5;
+  const isCreative=client.mode==='creative';
+  const maxSpeed=isCreative?36:18;
+  const maxDistance=maxSpeed*elapsed+3.5;
   const dx=nx-client.x,dy=ny-client.y,dz=nz-client.z;
-  if(Math.hypot(dx,dy,dz)>maxDistance) return false;
-  const steps=Math.max(1,Math.ceil(Math.max(Math.abs(dx),Math.abs(dy),Math.abs(dz))/.45));
+  const dist=Math.hypot(dx,dy,dz);
+  if(dist>maxDistance) return false;
+
+  // Fast open-sky check: if player is flying above terrain level, skip voxel collision loop entirely
+  const startTop=serverTopAt(client.x,client.z), endTop=serverTopAt(nx,nz);
+  const highestGround=Math.max(startTop,endTop);
+  if(client.y>highestGround+2.2 && ny>highestGround+2.2){
+    return true; // Clear open airspace - 0 voxel collision steps needed!
+  }
+
+  const steps=Math.max(1,Math.ceil(Math.max(Math.abs(dx),Math.abs(dy),Math.abs(dz))/.6));
   for(let step=1;step<=steps;step++){
     const t=step/steps;
-    if(serverPlayerCollides(client.x+dx*t,client.y+dy*t,client.z+dz*t)) return false;
+    const sy=client.y+dy*t;
+    if(sy<=highestGround+2.0 && serverPlayerCollides(client.x+dx*t,sy,client.z+dz*t)) return false;
   }
   return true;
 }
@@ -1783,7 +2174,7 @@ function rejectPermission(ws,x,y,z,access) {
   send(ws,{type:'permissionRejected',reason:access.reason||'no_permission',x,y,z,message:access.reason==='claim_required'?'Build, Break and private Use require a Claim':access.reason==='property_locked'?'Property is locked while listed on the market':access.reason==='construction_locked'?'Claim is locked while an NPC construction contract is active':'You do not have permission for this Claim'});
 }
 
-function commitEdit(client, x, y, z, id, oldId = null, serverMs = null) {
+function commitEdit(client, x, y, z, id, oldId = null) {
   const key = editKey(x, y, z);
   if (oldId !== null && world.edits[key] !== undefined && Number(world.edits[key]) !== Number(oldId)) {
     send(client.ws, { type: 'editRejected', reason: 'block_changed', x, y, z });
@@ -1791,7 +2182,8 @@ function commitEdit(client, x, y, z, id, oldId = null, serverMs = null) {
   }
   world.edits[key] = id;
   world.revision += 1;
-  broadcast({ type: 'blockUpdate', x, y, z, id, revision: world.revision, by: client.id, serverMs: serverMs===null?undefined:Number(serverMs.toFixed(2)) });
+  dirtyMapLocations.add(`${x},${z}`);
+  broadcast({ type: 'blockUpdate', x, y, z, id, revision: world.revision, by: client.id });
   const editedClaim=world.claims.find(claim=>claimContainsPoint(claim,x+.5,z+.5));
   if(editedClaim){
     const ownerClient=Array.from(clients.values()).find(other=>other.joined&&other.playerId===editedClaim.ownerId);
@@ -1853,6 +2245,7 @@ function switchActiveWorld(id){
   if(!next) return false;
   if(world.id!==next.id) saveWorld();
   activeWorldId=next.id; world=next; ensureDefaultLandAuctions(); entities.clear();
+  bakeMasterMapCache(true);
   for(const client of clients.values()){
     client.mode=world.mode;
     if(client.joined){ client.spawn=allocateSpawnSlot(client.identityKey,client.playerId); client.x=client.spawn.x; client.y=client.spawn.y; client.z=client.spawn.z; }
@@ -2483,17 +2876,15 @@ function purchaseNpcClaim(client,result){
     }
 
     if (message.type === 'blockBreak' || message.type === 'blockPlace') {
-      const editStartedAt=performance.now();
       const x = integer(message.x, NaN), y = integer(message.y, NaN), z = integer(message.z, NaN);
-      if (!validBlockEdit(client, x, y, z)) return send(ws, { type: 'editRejected', reason: 'too_far_or_invalid', x, y, z, serverMs:Number((performance.now()-editStartedAt).toFixed(2)) });
+      if (!validBlockEdit(client, x, y, z)) return send(ws, { type: 'editRejected', reason: 'too_far_or_invalid', x, y, z });
       const access=claimAccess(client,x,z,'build'); if(!access.ok) return rejectPermission(ws,x,y,z,access);
-      const editServerMs=()=>performance.now()-editStartedAt;
       if (message.type === 'blockBreak') {
-        commitEdit(client, x, y, z, 0, message.oldId === undefined ? null : integer(message.oldId, -1), editServerMs());
+        commitEdit(client, x, y, z, 0, message.oldId === undefined ? null : integer(message.oldId, -1));
       } else {
         const idValue = integer(message.id, 0);
-        if (idValue <= 0 || idValue > MAX_BLOCK_ID) return send(ws, { type: 'editRejected', reason: 'invalid_block', x, y, z, serverMs:Number((performance.now()-editStartedAt).toFixed(2)) });
-        commitEdit(client, x, y, z, idValue, message.oldId === undefined ? null : integer(message.oldId, -1), editServerMs());
+        if (idValue <= 0 || idValue > MAX_BLOCK_ID) return send(ws, { type: 'editRejected', reason: 'invalid_block', x, y, z });
+        commitEdit(client, x, y, z, idValue, message.oldId === undefined ? null : integer(message.oldId, -1));
       }
       return;
     }
@@ -2531,14 +2922,17 @@ setInterval(() => runBusinessCycle(), BUSINESS_TICK_MS);
 setInterval(() => runRentalCycle(), RENT_TICK_MS);
 setInterval(() => runLandAuctionCycle(), Math.max(1000, Math.min(RENT_TICK_MS, 10000)));
 setInterval(() => constructionRunCycle(), NPC_CONSTRUCTION_TICK_MS);
+setInterval(() => refreshMasterMapDeltas(), MAP_SYNC_INTERVAL_MS);
 setInterval(() => saveWorld(), 30000);
 
 ensureWorldDir();
+initSqliteDatabase();
 loadAllWorlds();
 loadAccounts();
 loadPlayerProfiles();
 loadCoinLedger();
 loadSpawnReservations();
+bakeMasterMapCache(true);
 server.listen(PORT, HOST, () => {
   log(`VoxelCraft server listening on http://${HOST}:${PORT} · active world ${world.id}`);
   log(`Game WebSocket: ws://${HOST}:${PORT}/ws`);
@@ -2552,6 +2946,9 @@ function shutdown(signal) {
   saveCoinLedger();
   saveSpawnReservations();
   saveWorld();
+  if (sqliteDb) {
+    try { sqliteDb.exec('PRAGMA wal_checkpoint(TRUNCATE);'); } catch (e) {}
+  }
   for (const client of clients.values()) client.ws.close(1001, 'Server shutting down');
   server.close(() => process.exit(0));
   setTimeout(() => process.exit(0), 3000);

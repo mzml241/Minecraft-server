@@ -14,7 +14,8 @@ function readSource() {
 
 let html = readSource();
 
-const serverStyle = `
+if (!html.includes('window.__SERVER_DEPLOYMENT__=true')) {
+  const serverStyle = `
 <style id="voxelcraft-server-style">
   /* The public deployment is multiplayer-only. Keep the original local
      client untouched; this generated shell hides local-world controls. */
@@ -25,16 +26,16 @@ const serverStyle = `
   #menu .serverAuthNote { color:#9bf0a4; }
 </style>
 `;
-html = html.replace('</head>', `${serverStyle}\n<script>window.__SERVER_DEPLOYMENT__=true;</script>\n</head>`);
-html = html.replace('<div class="opt"><label>SERVER LINK', '<div class="opt serverLocalHint"><label>SERVER LINK');
-html = html.replace('<div class="opt"><label>NEW WORLD SEED', '<div class="opt serverLocalHint"><label>NEW WORLD SEED');
-html = html.replace('<div class="fileHint">World files include the seed, edits, player position and settings. They can be copied to another browser or device.</div>', '<div class="fileHint serverLocalHint">World files are disabled on the multiplayer server.</div>');
-html = html.replace('<div><b>WORLD FILE</b> — download / open a portable world</div>', '<div class="serverLocalHint"><b>WORLD FILE</b> — local files are disabled on the multiplayer server</div>');
-html = html.replace('BUILD · OWN · EARN · a shared world with one Common Spawn Area.', 'MULTIPLAYER SERVER · BUILD · OWN · EARN · one shared Common Spawn Area.');
-html = html.replace('OFFLINE · Singleplayer', 'OFFLINE · LOGIN REQUIRED');
-html = html.replace('id="btnMpDisconnect">DISCONNECT', 'id="btnMpDisconnect">LOG OUT');
+  html = html.replace('</head>', `${serverStyle}\n<script>window.__SERVER_DEPLOYMENT__=true;</script>\n</head>`);
+  html = html.replace('<div class="opt"><label>SERVER LINK', '<div class="opt serverLocalHint"><label>SERVER LINK');
+  html = html.replace('<div class="opt"><label>NEW WORLD SEED', '<div class="opt serverLocalHint"><label>NEW WORLD SEED');
+  html = html.replace('<div class="fileHint">World files include the seed, edits, player position and settings. They can be copied to another browser or device.</div>', '<div class="fileHint serverLocalHint">World files are disabled on the multiplayer server.</div>');
+  html = html.replace('<div><b>WORLD FILE</b> — download / open a portable world</div>', '<div class="serverLocalHint"><b>WORLD FILE</b> — local files are disabled on the multiplayer server</div>');
+  html = html.replace('BUILD · OWN · EARN · a shared world with one Common Spawn Area.', 'MULTIPLAYER SERVER · BUILD · OWN · EARN · one shared Common Spawn Area.');
+  html = html.replace('OFFLINE · Singleplayer', 'OFFLINE · LOGIN REQUIRED');
+  html = html.replace('id="btnMpDisconnect">DISCONNECT', 'id="btnMpDisconnect">LOG OUT');
 
-const serverResumePatch = `
+  const serverResumePatch = `
 if(SERVER_DEPLOYMENT){
   window.setServerAuthFormVisible=function(show){
     ['mpUsername','mpPassword','mpName'].forEach(id=>{const el=document.getElementById(id);if(el&&el.parentElement)el.parentElement.style.display=show?'':'none';});
@@ -62,10 +63,12 @@ if(SERVER_DEPLOYMENT){
   setTimeout(beginRememberedServerSession,100);
 }
 `;
-const marker = 'requestAnimationFrame(frame);\n</script>';
-const markerIndex = html.lastIndexOf(marker);
-if (markerIndex < 0) throw new Error('Could not find client boot marker.');
-html = html.slice(0, markerIndex) + `requestAnimationFrame(frame);\n${serverResumePatch}</script>` + html.slice(markerIndex + marker.length);
+  const marker = 'requestAnimationFrame(frame);\n</script>';
+  const markerIndex = html.lastIndexOf(marker);
+  if (markerIndex >= 0) {
+    html = html.slice(0, markerIndex) + `requestAnimationFrame(frame);\n${serverResumePatch}</script>` + html.slice(markerIndex + marker.length);
+  }
+}
 
 fs.mkdirSync(publicDir, { recursive: true });
 fs.writeFileSync(outputPath, html);
