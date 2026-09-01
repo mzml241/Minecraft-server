@@ -13,10 +13,12 @@
 
   /* ---------- HUD ---------- */
   #hud { position:fixed; inset:0; pointer-events:none; z-index:10; }
-  #crosshair { position:absolute; left:50%; top:50%; width:22px; height:22px; margin:-11px 0 0 -11px; opacity:.85; }
-  #crosshair:before, #crosshair:after { content:''; position:absolute; background:#fff; mix-blend-mode:difference; }
+  #crosshair { position:absolute; left:50%; top:50%; width:22px; height:22px; margin:-11px 0 0 -11px; opacity:.85; transition:transform .08s ease, opacity .08s ease; }
+  #crosshair:before, #crosshair:after { content:''; position:absolute; background:#fff; mix-blend-mode:difference; transition:background .12s ease; }
   #crosshair:before { left:50%; top:0; width:2px; height:100%; margin-left:-1px; }
   #crosshair:after { top:50%; left:0; height:2px; width:100%; margin-top:-1px; }
+  #crosshair.in-reach { transform:scale(1.2); opacity:1; }
+  #crosshair.interact:before, #crosshair.interact:after { background:#57d15e; mix-blend-mode:normal; }
 
   #debug { position:absolute; left:10px; top:10px; font-size:9px; line-height:1.7; text-shadow:2px 2px 0 #000; background:rgba(0,0,0,.35); padding:8px 10px; border-left:3px solid #57d15e; }
   #debug b { color:#8ce88f; }
@@ -1185,7 +1187,7 @@ const FACE_DEFS = [
     }
   }
 })();
-const AOL=[0.60,0.74,0.87,1.0];
+const AOL=[0.52,0.70,0.86,1.0];
 const INSET = 0.5/ATLAS;
 
 const matOpaque = new THREE.MeshLambertMaterial({map:atlasTex, vertexColors:true});
@@ -1203,40 +1205,37 @@ function faceVisible(id,nid){
 
 function buildChunkMesh(ch){
   const data=ch.data;
-  const nbCache={};
-  const getNb=(dx,dz)=>{ const k=dx+'_'+dz; let v=nbCache[k];
-    if(v===undefined){ const c=chunks.get(ck(ch.cx+dx,ch.cz+dz)); v=c?c.data:null; nbCache[k]=v; } return v; };
+  const nbE = chunks.get(ck(ch.cx+1,ch.cz))?.data || null;
+  const nbW = chunks.get(ck(ch.cx-1,ch.cz))?.data || null;
+  const nbS = chunks.get(ck(ch.cx,ch.cz+1))?.data || null;
+  const nbN = chunks.get(ck(ch.cx,ch.cz-1))?.data || null;
+  const nbNE = chunks.get(ck(ch.cx+1,ch.cz-1))?.data || null;
+  const nbNW = chunks.get(ck(ch.cx-1,ch.cz-1))?.data || null;
+  const nbSE = chunks.get(ck(ch.cx+1,ch.cz+1))?.data || null;
+  const nbSW = chunks.get(ck(ch.cx-1,ch.cz+1))?.data || null;
+
   const gb=(x,y,z)=>{
     if(y<0||y>=H) return AIR;
-    let dx=0,dz=0,lx=x,lz=z;
-    if(x<0){dx=-1;lx+=CS;} else if(x>CS-1){dx=1;lx-=CS;}
-    if(z<0){dz=-1;lz+=CS;} else if(z>CS-1){dz=1;lz-=CS;}
-    if(dx===0&&dz===0) return data[(y<<8)|(lz<<4)|lx];
-    const d=getNb(dx,dz); return d?d[(y<<8)|(lz<<4)|lx]:AIR;
+    if(x>=0&&x<CS&&z>=0&&z<CS) return data[(y<<8)|(z<<4)|x];
+    if(x<0){
+      const lx=x+CS;
+      if(z>=0&&z<CS) return nbW ? nbW[(y<<8)|(z<<4)|lx] : AIR;
+      if(z<0) return nbNW ? nbNW[(y<<8)|((z+CS)<<4)|lx] : AIR;
+      return nbSW ? nbSW[(y<<8)|((z-CS)<<4)|lx] : AIR;
+    }
+    if(x>=CS){
+      const lx=x-CS;
+      if(z>=0&&z<CS) return nbE ? nbE[(y<<8)|(z<<4)|lx] : AIR;
+      if(z<0) return nbNE ? nbNE[(y<<8)|((z+CS)<<4)|lx] : AIR;
+      return nbSE ? nbSE[(y<<8)|((z-CS)<<4)|lx] : AIR;
+    }
+    if(z<0) return nbN ? nbN[(y<<8)|((z+CS)<<4)|x] : AIR;
+    return nbS ? nbS[(y<<8)|((z-CS)<<4)|x] : AIR;
   };
   const useAO = settings.ao;
 
   const O={p:[],n:[],u:[],c:[],i:[]}, A={p:[],n:[],u:[],c:[],i:[]}, W={p:[],n:[],u:[],c:[],i:[]};
-  const push=(S,x,y,z,f,tile,br,vy1,wx,wz)=>{
-    const base=S.p.length/3;
-    const tu=tile%COLS, tv=(tile/COLS)|0;
-    const u0=tu/COLS+INSET, u1=(tu+1)/COLS-INSET;
-    const v0=1-(tv+1)/ROWS+INSET, v1=1-tv/ROWS-INSET;
-    const uvs=[[u0,v0],[u1,v0],[u1,v1],[u0,v1]];
-    for(let ci=0;ci<4;ci++){
-      const c=f.c[ci];
-      let py=y+c[1]; if(vy1!==null && c[1]===1) py=vy1;
-      S.p.push(x+c[0], py, z+c[2]);
-      S.n.push(f.n[0],f.n[1],f.n[2]);
-      if(S===W){
-        if(f.n[1]!==0) S.u.push((wx+c[0])*0.5,(wz+c[2])*0.5);
-        else if(f.n[0]!==0) S.u.push((wz+c[2])*0.5, py*0.5);
-        else S.u.push((wx+c[0])*0.5, py*0.5);
-      } else S.u.push(uvs[ci][0],uvs[ci][1]);
-      S.c.push(br,br,br);
-    }
-    S.i.push(base,base+1,base+2, base,base+2,base+3);
-  };
+
   const pushAO=(S,x,y,z,f,tile,emit,vy1,wx,wz)=>{
     const base=S.p.length/3;
     const tu=tile%COLS, tv=(tile/COLS)|0;
@@ -1265,23 +1264,72 @@ function buildChunkMesh(ch){
     else S.i.push(base,base+1,base+2, base,base+2,base+3);
   };
 
+  // 1. Greedy Meshing for Water Bodies (Merged quads with continuous RepeatWrapping)
+  const waterVisited = new Uint8Array(CS*CS);
+  for(let y=0;y<H;y++){
+    // Top water surface (y+0.88)
+    waterVisited.fill(0);
+    for(let z=0;z<CS;z++) for(let x=0;x<CS;x++){
+      if(waterVisited[z*CS+x]) continue;
+      if(data[(y<<8)|(z<<4)|x]!==ID_WATER || gb(x,y+1,z)===ID_WATER) continue;
+      let w=1; while(x+w<CS && !waterVisited[z*CS+(x+w)] && data[(y<<8)|(z<<4)|(x+w)]===ID_WATER && gb(x+w,y+1,z)!==ID_WATER) w++;
+      let d=1, canExpand=true;
+      while(z+d<CS && canExpand){
+        for(let k=0;k<w;k++){
+          if(waterVisited[(z+d)*CS+(x+k)] || data[(y<<8)|((z+d)<<4)|(x+k)]!==ID_WATER || gb(x+k,y+1,z+d)===ID_WATER){ canExpand=false; break; }
+        }
+        if(canExpand) d++;
+      }
+      for(let dz=0;dz<d;dz++) for(let dx=0;dx<w;dx++) waterVisited[(z+dz)*CS+(x+dx)]=1;
+      
+      const base=W.p.length/3, wx=ch.cx*CS+x, wz=ch.cz*z;
+      const py=y+0.88;
+      W.p.push(x,py,z+d,  x+w,py,z+d,  x+w,py,z,  x,py,z);
+      W.n.push(0,1,0, 0,1,0, 0,1,0, 0,1,0);
+      W.u.push((wx)*0.5,(wz+d)*0.5, (wx+w)*0.5,(wz+d)*0.5, (wx+w)*0.5,(wz)*0.5, (wx)*0.5,(wz)*0.5);
+      const br=0.96;
+      W.c.push(br,br,br, br,br,br, br,br,br, br,br,br);
+      W.i.push(base,base+1,base+2, base,base+2,base+3);
+    }
+  }
+
+  // 2. Standard block mesher with pre-fetched neighbor lookups and 4-corner AO
   for(let y=0;y<H;y++) for(let z=0;z<CS;z++) for(let x=0;x<CS;x++){
     const id=data[(y<<8)|(z<<4)|x];
     if(id===AIR) continue;
     const bd=BLOCKS[id];
     const wx=ch.cx*CS+x, wz=ch.cz*CS+z;
     if(id===BID.door && openDoors.has(voxelKey(wx,y,wz))) continue;
-    const isWater = id===ID_WATER;
+    if(id===ID_WATER){
+      // Water sides and bottom
+      for(let fi=0;fi<6;fi++){
+        if(fi===2) continue; // Top already greedy-meshed
+        const f=FACE_DEFS[fi];
+        const nid=gb(x+f.n[0], y+f.n[1], z+f.n[2]);
+        if(!faceVisible(id,nid)) continue;
+        const base=W.p.length/3;
+        for(let ci=0;ci<4;ci++){
+          const c=f.c[ci];
+          let py=y+c[1];
+          W.p.push(x+c[0], py, z+c[2]);
+          W.n.push(f.n[0],f.n[1],f.n[2]);
+          if(f.n[1]!==0) W.u.push((wx+c[0])*0.5,(wz+c[2])*0.5);
+          else if(f.n[0]!==0) W.u.push((wz+c[2])*0.5, py*0.5);
+          else W.u.push((wx+c[0])*0.5, py*0.5);
+          const br=f.l*0.96;
+          W.c.push(br,br,br);
+        }
+        W.i.push(base,base+1,base+2, base,base+2,base+3);
+      }
+      continue;
+    }
     const emitsLight=bd.emit && !(id===BID.lantern && lanternOff.has(voxelKey(wx,y,wz)));
     for(let fi=0;fi<6;fi++){
       const f=FACE_DEFS[fi];
       const nid=gb(x+f.n[0], y+f.n[1], z+f.n[2]);
       if(!faceVisible(id,nid)) continue;
       const tile=bd.tiles[f.ti];
-      if(isWater){
-        const low = (gb(x,y+1,z)!==ID_WATER) ? y+0.88 : null;
-        push(W,x,y,z,f,tile,f.l*0.96, low, wx,wz);
-      } else if(bd.transparent){
+      if(bd.transparent){
         pushAO(A,x,y,z,f,tile,emitsLight,null,wx,wz);
       } else {
         pushAO(O,x,y,z,f,tile,emitsLight,null,wx,wz);
@@ -1631,178 +1679,438 @@ function updateParticles(dt){
 }
 
 /* =========================================================
-   8. AUDIO (tiny synth)
+   8. AUDIO & SOUND FX ENGINE (Procedural Synth + Custom Assets)
    ========================================================= */
 const Snd = {
-  ctx:null,
-  ready(){ if(!this.ctx){ try{ this.ctx=new (window.AudioContext||window.webkitAudioContext)(); }catch(e){} } return !!this.ctx; },
-  noise(dur,freq,q,vol,type){
-    if(!this.ready()) return;
-    const c=this.ctx, n=c.sampleRate*dur|0, buf=c.createBuffer(1,n,c.sampleRate), d=buf.getChannelData(0);
-    for(let i=0;i<n;i++) d[i]=(Math.random()*2-1)*(1-i/n);
-    const src=c.createBufferSource(); src.buffer=buf;
-    const flt=c.createBiquadFilter(); flt.type=type||'bandpass'; flt.frequency.value=freq; flt.Q.value=q||1;
-    const g=c.createGain(); g.gain.value=vol||0.2;
-    src.connect(flt); flt.connect(g); g.connect(c.destination); src.start();
+  ctx: null,
+  customBuffers: new Map(),
+  customLoadAttempted: new Set(),
+
+  ready() {
+    if (!this.ctx) {
+      try {
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        if (AudioCtx) this.ctx = new AudioCtx();
+      } catch (e) {}
+    }
+    if (this.ctx && this.ctx.state === 'suspended') {
+      this.ctx.resume().catch(() => {});
+    }
+    return !!this.ctx;
   },
-  tone(f,dur,vol,type){
-    if(!this.ready()) return;
-    const c=this.ctx, o=c.createOscillator(), g=c.createGain();
-    o.type=type||'square'; o.frequency.value=f;
-    g.gain.setValueAtTime(vol||0.08,c.currentTime);
-    g.gain.exponentialRampToValueAtTime(0.001,c.currentTime+dur);
-    o.connect(g); g.connect(c.destination); o.start(); o.stop(c.currentTime+dur);
+
+  loadCustomSound(name, url) {
+    if (!this.ready() || this.customLoadAttempted.has(name)) return;
+    this.customLoadAttempted.add(name);
+    fetch(url)
+      .then(res => res.ok ? res.arrayBuffer() : Promise.reject())
+      .then(buf => this.ctx.decodeAudioData(buf))
+      .then(decoded => { this.customBuffers.set(name, decoded); })
+      .catch(() => {}); // Fallback gracefully to high-res procedural synth
   },
-  break_(){ this.noise(0.20, 700, 0.8, 0.24); this.tone(150,0.09,0.05,'triangle'); },
-  place(){ this.noise(0.09, 1200, 1.4, 0.16); this.tone(320,0.06,0.05,'square'); },
-  step(){ this.noise(0.07, 380+Math.random()*180, 1.1, 0.09); },
-  click(){ this.tone(880,0.04,0.05,'square'); },
-  splash(){ this.noise(0.3, 500, 0.6, 0.18); }
+
+  playBuffer(name, vol = 1.0, rate = 1.0) {
+    const buf = this.customBuffers.get(name);
+    if (!buf || !this.ready()) return false;
+    try {
+      const src = this.ctx.createBufferSource();
+      src.buffer = buf;
+      src.playbackRate.value = rate;
+      const gain = this.ctx.createGain();
+      gain.gain.value = vol;
+      src.connect(gain);
+      gain.connect(this.ctx.destination);
+      src.start();
+      return true;
+    } catch (e) {
+      return false;
+    }
+  },
+
+  noise(dur, freq, q, vol, type = 'bandpass') {
+    if (!this.ready()) return;
+    const c = this.ctx, n = Math.max(1, (c.sampleRate * dur) | 0);
+    const buf = c.createBuffer(1, n, c.sampleRate), d = buf.getChannelData(0);
+    for (let i = 0; i < n; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / n, 1.2);
+    const src = c.createBufferSource();
+    src.buffer = buf;
+    const flt = c.createBiquadFilter();
+    flt.type = type;
+    flt.frequency.value = freq;
+    flt.Q.value = q || 1;
+    const g = c.createGain();
+    g.gain.setValueAtTime(vol || 0.2, c.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.0001, c.currentTime + dur);
+    src.connect(flt);
+    flt.connect(g);
+    g.connect(c.destination);
+    src.start();
+  },
+
+  tone(f, dur, vol, type = 'square', pitchDecay = 0) {
+    if (!this.ready()) return;
+    const c = this.ctx, o = c.createOscillator(), g = c.createGain();
+    o.type = type;
+    o.frequency.setValueAtTime(f, c.currentTime);
+    if (pitchDecay > 0) {
+      o.frequency.exponentialRampToValueAtTime(Math.max(20, f * 0.25), c.currentTime + dur);
+    }
+    g.gain.setValueAtTime(vol || 0.08, c.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.0001, c.currentTime + dur);
+    o.connect(g);
+    g.connect(c.destination);
+    o.start();
+    o.stop(c.currentTime + dur);
+  },
+
+  step(blockId) {
+    const key = blockId ? (BLOCKS[blockId]?.key || '') : '';
+    if (key.includes('log') || key.includes('plank') || key.includes('fence') || key.includes('crafting')) {
+      if (this.playBuffer('footstep_wood', 0.25, 0.95 + Math.random() * 0.1)) return;
+      this.noise(0.06, 260 + Math.random() * 60, 2.2, 0.12, 'bandpass');
+      this.tone(180 + Math.random() * 40, 0.05, 0.04, 'triangle');
+    } else if (key.includes('sand') || key.includes('gravel')) {
+      if (this.playBuffer('footstep_sand', 0.22, 0.95 + Math.random() * 0.1)) return;
+      this.noise(0.08, 600 + Math.random() * 150, 1.0, 0.11, 'lowpass');
+    } else if (key.includes('stone') || key.includes('cobble') || key.includes('brick') || key.includes('ore') || key.includes('quartz')) {
+      if (this.playBuffer('footstep_stone', 0.25, 0.95 + Math.random() * 0.1)) return;
+      this.noise(0.06, 850 + Math.random() * 200, 1.4, 0.13, 'bandpass');
+      this.tone(120, 0.04, 0.03, 'sine');
+    } else {
+      if (this.playBuffer('footstep_grass', 0.22, 0.95 + Math.random() * 0.1)) return;
+      this.noise(0.07, 380 + Math.random() * 160, 1.1, 0.09, 'bandpass');
+    }
+  },
+
+  break_(blockId) {
+    const key = blockId ? (BLOCKS[blockId]?.key || '') : '';
+    if (this.playBuffer('block_break', 0.35, 0.92 + Math.random() * 0.16)) return;
+    if (key.includes('glass') || key.includes('ice')) {
+      this.noise(0.18, 2200, 0.8, 0.22, 'highpass');
+      this.tone(1400, 0.12, 0.06, 'triangle', 1);
+    } else if (key.includes('log') || key.includes('plank')) {
+      this.noise(0.18, 420, 1.4, 0.25, 'bandpass');
+      this.tone(110, 0.14, 0.08, 'triangle', 1);
+    } else {
+      this.noise(0.20, 680, 0.8, 0.24, 'bandpass');
+      this.tone(140, 0.09, 0.06, 'triangle', 1);
+    }
+  },
+
+  place(blockId) {
+    if (this.playBuffer('block_place', 0.3, 0.95 + Math.random() * 0.1)) return;
+    this.noise(0.08, 1100, 1.4, 0.16, 'bandpass');
+    this.tone(310, 0.06, 0.05, 'square', 1);
+  },
+
+  coin() {
+    if (this.playBuffer('coin_transaction', 0.4)) return;
+    if (!this.ready()) return;
+    const c = this.ctx;
+    const playChime = (f, delay, dur) => {
+      setTimeout(() => {
+        if (!this.ready()) return;
+        const o = c.createOscillator(), g = c.createGain();
+        o.type = 'sine';
+        o.frequency.setValueAtTime(f, c.currentTime);
+        g.gain.setValueAtTime(0.09, c.currentTime);
+        g.gain.exponentialRampToValueAtTime(0.0001, c.currentTime + dur);
+        o.connect(g);
+        g.connect(c.destination);
+        o.start();
+        o.stop(c.currentTime + dur);
+      }, delay);
+    };
+    playChime(1318.5, 0, 0.22);
+    playChime(1760.0, 75, 0.35);
+  },
+
+  door(open) {
+    if (this.playBuffer('door_open_close', 0.35)) return;
+    this.noise(0.15, 320, 1.5, 0.18, 'bandpass');
+    this.tone(open ? 440 : 330, 0.08, 0.06, 'triangle', 1);
+  },
+
+  splash() {
+    if (this.playBuffer('splash', 0.35)) return;
+    this.noise(0.35, 480, 0.6, 0.22, 'lowpass');
+    this.tone(160, 0.2, 0.06, 'sine', 1);
+  },
+
+  click() {
+    this.tone(880, 0.04, 0.05, 'square');
+  },
+
+  hit() {
+    this.noise(0.22, 280, 0.9, 0.3, 'lowpass');
+    this.tone(85, 0.15, 0.12, 'sawtooth', 1);
+  }
 };
 
+// Pre-attempt loading user audio assets if placed in public/audio/
+['footstep_grass','footstep_stone','footstep_wood','footstep_sand','block_break','block_place','coin_transaction','door_open_close','splash'].forEach(k => {
+  Snd.loadCustomSound(k, `/audio/${k}.mp3`);
+});
+
 /* =========================================================
-   9. PLAYER
+   9. PLAYER PHYSICS, AABB SWEPT COLLISION & AUTO-STEP
    ========================================================= */
 const player = {
-  pos:new THREE.Vector3(0.5, 60, 0.5),
-  vel:new THREE.Vector3(),
-  yaw:0, pitch:0,
-  onGround:false, fly:false, mode:'creative',
-  inWater:false, sprint:false, height:1.8, eye:1.62, half:0.3
+  pos: new THREE.Vector3(0.5, 60, 0.5),
+  vel: new THREE.Vector3(),
+  yaw: 0, pitch: 0,
+  onGround: false, fly: false, mode: 'creative',
+  inWater: false, sprint: false, height: 1.8, eye: 1.62, half: 0.3
 };
-// Keep a real spawn point instead of recalculating a random nearby point every time R is pressed.
-const spawnPoint=new THREE.Vector3(0.5,SEA+8,0.5);
-let bobY=0, swing=0, walkDist=0, dayTime=0.28;
-const MAX_HEALTH=100;
-let playerHealth=MAX_HEALTH, damageFlashTimer=0, walletState={balance:0,initialBalance:0,totalEarned:0,totalSpent:0,transactionCount:0,ledger:[]};
-function updateHealthHud(){
-  const value=document.getElementById('healthValue'), fill=document.getElementById('healthFill');
-  const health=Math.max(0,Math.min(MAX_HEALTH,Math.round(playerHealth)));
-  if(value) value.textContent=health+' / '+MAX_HEALTH;
-  if(fill) fill.style.width=(health/MAX_HEALTH*100)+'%';
+
+const spawnPoint = new THREE.Vector3(0.5, SEA + 8, 0.5);
+let bobY = 0, swing = 0, walkDist = 0, dayTime = 0.28;
+const MAX_HEALTH = 100;
+let playerHealth = MAX_HEALTH, damageFlashTimer = 0, walletState = { balance: 0, initialBalance: 0, totalEarned: 0, totalSpent: 0, transactionCount: 0, ledger: [] };
+
+function updateHealthHud() {
+  const value = document.getElementById('healthValue'), fill = document.getElementById('healthFill');
+  const health = Math.max(0, Math.min(MAX_HEALTH, Math.round(playerHealth)));
+  if (value) value.textContent = health + ' / ' + MAX_HEALTH;
+  if (fill) fill.style.width = (health / MAX_HEALTH * 100) + '%';
 }
-function updateWalletHud(){
-  const balance=Math.max(0,Math.floor(Number(walletState?.balance)||0)),value=document.getElementById('walletValue'),menuValue=document.getElementById('menuWalletValue');
-  if(value) value.textContent=balance.toLocaleString()+' COIN';
-  if(menuValue) menuValue.textContent=balance.toLocaleString()+' COIN';
+
+function updateWalletHud() {
+  const balance = Math.max(0, Math.floor(Number(walletState?.balance) || 0)), value = document.getElementById('walletValue'), menuValue = document.getElementById('menuWalletValue');
+  if (value) value.textContent = balance.toLocaleString() + ' COIN';
+  if (menuValue) menuValue.textContent = balance.toLocaleString() + ' COIN';
 }
-function resetPlayerHealth(){ playerHealth=MAX_HEALTH; updateHealthHud(); }
+
+function resetPlayerHealth() { playerHealth = MAX_HEALTH; updateHealthHud(); }
 updateWalletHud();
-function applyPlayerDamage(amount,serverHealth=null,source='enemy'){
-  const next=Number.isFinite(Number(serverHealth))?Number(serverHealth):Math.max(0,playerHealth-(Number(amount)||0));
-  playerHealth=Math.max(0,Math.min(MAX_HEALTH,next)); updateHealthHud();
-  const flash=document.getElementById('damageFlash'); if(flash){ flash.classList.add('hit'); clearTimeout(applyPlayerDamage._flash); applyPlayerDamage._flash=setTimeout(()=>flash.classList.remove('hit'),150); }
-  if(playerHealth>0) toast('Hit by '+source+' · Health '+Math.round(playerHealth));
-  else if(!applyPlayerDamage._respawn){ toast('Defeated by '+source); applyPlayerDamage._respawn=setTimeout(()=>{applyPlayerDamage._respawn=null;respawnLocalPlayer();},700); }
+
+function applyPlayerDamage(amount, serverHealth = null, source = 'enemy') {
+  const next = Number.isFinite(Number(serverHealth)) ? Number(serverHealth) : Math.max(0, playerHealth - (Number(amount) || 0));
+  playerHealth = Math.max(0, Math.min(MAX_HEALTH, next));
+  updateHealthHud();
+  Snd.hit();
+  const flash = document.getElementById('damageFlash');
+  if (flash) {
+    flash.classList.add('hit');
+    clearTimeout(applyPlayerDamage._flash);
+    applyPlayerDamage._flash = setTimeout(() => flash.classList.remove('hit'), 150);
+  }
+  if (playerHealth > 0) toast('Hit by ' + source + ' · Health ' + Math.round(playerHealth));
+  else if (!applyPlayerDamage._respawn) {
+    toast('Defeated by ' + source);
+    applyPlayerDamage._respawn = setTimeout(() => { applyPlayerDamage._respawn = null; respawnLocalPlayer(); }, 700);
+  }
 }
-function respawnLocalPlayer(){
-  playerHealth=MAX_HEALTH; player.pos.copy(findSpawn()); player.vel.set(0,0,0); player.onGround=false; updateHealthHud(); toast('You respawned at spawn');
+
+function respawnLocalPlayer() {
+  playerHealth = MAX_HEALTH; player.pos.copy(findSpawn()); player.vel.set(0, 0, 0); player.onGround = false; updateHealthHud(); toast('You respawned at spawn');
 }
 updateHealthHud();
 
-const keys={};
-const input={fwd:0,side:0,jump:false,down:false};
+const keys = {};
+const input = { fwd: 0, side: 0, jump: false, down: false };
 
-function collides(px,py,pz){
-  const h=player.half;
-  const x0=Math.floor(px-h), x1=Math.floor(px+h);
-  const y0=Math.floor(py), y1=Math.floor(py+player.height-0.001);
-  const z0=Math.floor(pz-h), z1=Math.floor(pz+h);
-  for(let y=y0;y<=y1;y++) for(let z=z0;z<=z1;z++) for(let x=x0;x<=x1;x++){
-    const id=getBlock(x,y,z);
-    if(isSolidBlock(id) && !(id===BID.door && openDoors.has(voxelKey(x,y,z)))) return true;
+const EPS = 0.0001;
+const STEP_HEIGHT = 1.05;
+
+function isAABBColliding(px, py, pz) {
+  const h = player.half;
+  const x0 = Math.floor(px - h + EPS), x1 = Math.floor(px + h - EPS);
+  const y0 = Math.floor(py + EPS), y1 = Math.floor(py + player.height - EPS);
+  const z0 = Math.floor(pz - h + EPS), z1 = Math.floor(pz + h - EPS);
+
+  for (let y = y0; y <= y1; y++) {
+    for (let z = z0; z <= z1; z++) {
+      for (let x = x0; x <= x1; x++) {
+        const id = getBlock(x, y, z);
+        if (isSolidBlock(id) && !(id === BID.door && openDoors.has(voxelKey(x, y, z)))) {
+          return true;
+        }
+      }
+    }
   }
   return false;
 }
-function moveAxis(axis, amount){
-  if(amount===0) return false;
-  const p=player.pos;
-  const step = Math.sign(amount)*Math.min(Math.abs(amount),0.2);
-  let remaining=amount, hit=false;
-  while(Math.abs(remaining)>1e-6){
-    const d=Math.abs(remaining)>0.2? step : remaining;
-    const old=p[axis];
-    p[axis]+=d;
-    if(collides(p.x,p.y,p.z)){ p[axis]=old; hit=true; break; }
-    remaining-=d;
+
+function moveAxisPrecise(axis, amount) {
+  if (Math.abs(amount) < 1e-6) return false;
+  const p = player.pos;
+  const h = player.half;
+  const sign = Math.sign(amount);
+  const dist = Math.abs(amount);
+  const maxStep = 0.1;
+  const numSteps = Math.ceil(dist / maxStep);
+  const stepSize = (dist / numSteps) * sign;
+
+  for (let i = 0; i < numSteps; i++) {
+    const old = p[axis];
+    p[axis] += stepSize;
+    if (isAABBColliding(p.x, p.y, p.z)) {
+      p[axis] = old;
+      if (axis === 'y') {
+        if (sign > 0) {
+          const ceilingY = Math.floor(old + player.height + stepSize);
+          p.y = ceilingY - player.height - EPS;
+        } else {
+          const floorY = Math.floor(old + stepSize);
+          p.y = floorY + 1 + EPS;
+        }
+      } else if (axis === 'x') {
+        if (sign > 0) {
+          const wallX = Math.floor(old + h + stepSize);
+          p.x = wallX - h - EPS;
+        } else {
+          const wallX = Math.floor(old - h + stepSize);
+          p.x = wallX + 1 + h + EPS;
+        }
+      } else if (axis === 'z') {
+        if (sign > 0) {
+          const wallZ = Math.floor(old + h + stepSize);
+          p.z = wallZ - h - EPS;
+        } else {
+          const wallZ = Math.floor(old - h + stepSize);
+          p.z = wallZ + 1 + h + EPS;
+        }
+      }
+      return true;
+    }
   }
-  return hit;
+  return false;
 }
-function findSpawn(){
-  for(let r=0;r<40;r++){
-    const x=Math.floor(spawnPoint.x)+((r%5)-2)*3, z=Math.floor(spawnPoint.z)+(((r/5)|0)-2)*3;
-    const c=sampleColumn(x,z);
-    if(c.h>SEA+1 && c.biome!=='mountains') return new THREE.Vector3(x+0.5, clamp(c.h+2.2,2,H-player.height), z+0.5);
+
+function moveWithAutoStep(dx, dz) {
+  const p = player.pos;
+  const canAutoStep = player.onGround && !player.fly && !player.inWater;
+
+  if (canAutoStep) {
+    const startX = p.x, startY = p.y, startZ = p.z;
+    const hitX = moveAxisPrecise('x', dx);
+    const hitZ = moveAxisPrecise('z', dz);
+
+    if (hitX || hitZ) {
+      const flatX = p.x, flatZ = p.z;
+      p.set(startX, startY, startZ);
+
+      // 1. Elevated step test
+      p.y += STEP_HEIGHT;
+      if (!isAABBColliding(p.x, p.y, p.z)) {
+        moveAxisPrecise('x', dx);
+        moveAxisPrecise('z', dz);
+        moveAxisPrecise('y', -STEP_HEIGHT);
+
+        const distStepSq = (p.x - startX) ** 2 + (p.z - startZ) ** 2;
+        const distFlatSq = (flatX - startX) ** 2 + (flatZ - startZ) ** 2;
+        if (distStepSq > distFlatSq + 1e-4) {
+          return; // Step-up succeeded
+        }
+      }
+      p.set(flatX, startY, flatZ);
+    }
+  } else {
+    moveAxisPrecise('x', dx);
+    moveAxisPrecise('z', dz);
   }
-  return new THREE.Vector3(0.5, clamp(SEA+8,2,H-player.height), 0.5);
 }
 
-function updatePlayer(dt){
-  // if the chunk under the player has not streamed in yet, hold still
-  if(!chunks.has(ck(Math.floor(player.pos.x/CS), Math.floor(player.pos.z/CS)))){
-    player.vel.set(0,0,0); return;
+function findSpawn() {
+  for (let r = 0; r < 40; r++) {
+    const x = Math.floor(spawnPoint.x) + ((r % 5) - 2) * 3, z = Math.floor(spawnPoint.z) + (((r / 5) | 0) - 2) * 3;
+    const c = sampleColumn(x, z);
+    if (c.h > SEA + 1 && c.biome !== 'mountains') return new THREE.Vector3(x + 0.5, clamp(c.h + 2.2, 2, H - player.height), z + 0.5);
   }
-  const eyeBlock = getBlock(Math.floor(player.pos.x), Math.floor(player.pos.y+player.eye), Math.floor(player.pos.z));
-  const feetBlock = getBlock(Math.floor(player.pos.x), Math.floor(player.pos.y+0.2), Math.floor(player.pos.z));
-  const wasWater=player.inWater;
-  player.inWater = (feetBlock===ID_WATER || eyeBlock===ID_WATER);
-  const inLava = (feetBlock===ID_LAVA);
-  const waterOverlay=$('#waterOverlay');
-  waterOverlay.style.opacity=inLava?'0.22':(player.inWater?'0.28':'0');
-  if(player.inWater && !wasWater) Snd.splash();
+  return new THREE.Vector3(0.5, clamp(SEA + 8, 2, H - player.height), 0.5);
+}
 
-  const speedBase = player.fly ? 13 : (player.inWater?3.4:(player.sprint?6.6:4.4));
-  const fwd=new THREE.Vector3(-Math.sin(player.yaw),0,-Math.cos(player.yaw));
-  const right=new THREE.Vector3(Math.cos(player.yaw),0,-Math.sin(player.yaw));
-  const wish=new THREE.Vector3().addScaledVector(fwd,input.fwd).addScaledVector(right,input.side);
-  if(wish.lengthSq()>0) wish.normalize();
+function updatePlayer(dt) {
+  if (!chunks.has(ck(Math.floor(player.pos.x / CS), Math.floor(player.pos.z / CS)))) {
+    player.vel.set(0, 0, 0); return;
+  }
 
-  if(player.fly){
-    player.vel.x = wish.x*speedBase;
-    player.vel.z = wish.z*speedBase;
-    let vy=0;
-    if(input.jump) vy+=speedBase*0.8;
-    if(input.down) vy-=speedBase*0.8;
+  const px = Math.floor(player.pos.x), pz = Math.floor(player.pos.z);
+  const eyeBlock = getBlock(px, Math.floor(player.pos.y + player.eye), pz);
+  const feetBlock = getBlock(px, Math.floor(player.pos.y + 0.2), pz);
+  const groundBlock = getBlock(px, Math.floor(player.pos.y - 0.2), pz);
+
+  const wasWater = player.inWater;
+  player.inWater = (feetBlock === ID_WATER || eyeBlock === ID_WATER);
+  const inLava = (feetBlock === ID_LAVA);
+  const waterOverlay = $('#waterOverlay');
+  if (waterOverlay) {
+    waterOverlay.style.opacity = inLava ? '0.22' : (player.inWater ? '0.28' : '0');
+  }
+  if (player.inWater && !wasWater) Snd.splash();
+
+  const speedBase = player.fly ? 13 : (player.inWater ? 3.4 : (player.sprint ? 6.6 : 4.4));
+  const fwd = new THREE.Vector3(-Math.sin(player.yaw), 0, -Math.cos(player.yaw));
+  const right = new THREE.Vector3(Math.cos(player.yaw), 0, -Math.sin(player.yaw));
+  const wish = new THREE.Vector3().addScaledVector(fwd, input.fwd).addScaledVector(right, input.side);
+  if (wish.lengthSq() > 0) wish.normalize();
+
+  if (player.fly) {
+    player.vel.x = wish.x * speedBase;
+    player.vel.z = wish.z * speedBase;
+    let vy = 0;
+    if (input.jump) vy += speedBase * 0.8;
+    if (input.down) vy -= speedBase * 0.8;
     player.vel.y = vy;
   } else {
-    const accel = player.onGround? 14 : 5.5;
-    player.vel.x += (wish.x*speedBase - player.vel.x)*Math.min(1,accel*dt);
-    player.vel.z += (wish.z*speedBase - player.vel.z)*Math.min(1,accel*dt);
-    if(player.inWater){
-      player.vel.y += -9*dt;
-      player.vel.y = Math.max(player.vel.y, -3.2);
-      if(input.jump) player.vel.y = 3.6;
-      player.vel.x*=0.86; player.vel.z*=0.86;
+    const accel = player.onGround ? 16 : 6.0;
+    player.vel.x += (wish.x * speedBase - player.vel.x) * Math.min(1, accel * dt);
+    player.vel.z += (wish.z * speedBase - player.vel.z) * Math.min(1, accel * dt);
+
+    if (player.inWater) {
+      if (input.jump) {
+        player.vel.y = Math.min(3.6, player.vel.y + 20 * dt);
+      } else if (input.down) {
+        player.vel.y = Math.max(-3.5, player.vel.y - 20 * dt);
+      } else {
+        player.vel.y = Math.max(-1.5, player.vel.y - 6 * dt);
+      }
+      player.vel.x *= Math.pow(0.85, dt * 60);
+      player.vel.z *= Math.pow(0.85, dt * 60);
+      player.vel.y *= Math.pow(0.90, dt * 60);
     } else {
-      player.vel.y -= (inLava? 9 : 30)*dt;
+      player.vel.y -= (inLava ? 9 : 30) * dt;
       player.vel.y = Math.max(player.vel.y, -55);
-      if(input.jump && player.onGround){ player.vel.y = 9.4; player.onGround=false; }
+      if (input.jump && player.onGround) {
+        player.vel.y = 9.4;
+        player.onGround = false;
+      }
     }
   }
 
-  const hitY = moveAxis('y', player.vel.y*dt);
-  if(hitY){
-    if(player.vel.y<0) player.onGround=true;
-    player.vel.y=0;
-  } else if(Math.abs(player.vel.y)>0.001) player.onGround=false;
-  const hitX = moveAxis('x', player.vel.x*dt);
-  const hitZ = moveAxis('z', player.vel.z*dt);
-  if(hitX) player.vel.x=0; if(hitZ) player.vel.z=0;
+  // Vertical Movement
+  const hitY = moveAxisPrecise('y', player.vel.y * dt);
+  if (hitY) {
+    if (player.vel.y < 0) player.onGround = true;
+    player.vel.y = 0;
+  } else if (Math.abs(player.vel.y) > 0.001) {
+    player.onGround = false;
+  }
 
-  if(player.pos.y < -20){ player.pos.copy(findSpawn()); player.vel.set(0,0,0); }
-  if(player.pos.y > MAX_FLIGHT_HEIGHT){ player.pos.y=MAX_FLIGHT_HEIGHT; player.vel.y=0; }
+  // Horizontal Movement with Auto-Step
+  moveWithAutoStep(player.vel.x * dt, player.vel.z * dt);
 
-  // view bob + footsteps
+  if (player.pos.y < -20) { player.pos.copy(findSpawn()); player.vel.set(0, 0, 0); }
+  if (player.pos.y > MAX_FLIGHT_HEIGHT) { player.pos.y = MAX_FLIGHT_HEIGHT; player.vel.y = 0; }
+
+  // View Bobbing & Material-Aware Footstep Sounds
   const hspeed = Math.hypot(player.vel.x, player.vel.z);
-  if(player.onGround && hspeed>0.7){
-    walkDist += hspeed*dt;
-    bobY = Math.sin(walkDist*5.5)*0.045;
-    if(walkDist>2.0){ walkDist=0; Snd.step(); }
-  } else bobY *= 0.9;
+  if (player.onGround && hspeed > 0.7) {
+    walkDist += hspeed * dt;
+    bobY = Math.sin(walkDist * 5.5) * 0.045;
+    if (walkDist > 2.0) {
+      walkDist = 0;
+      Snd.step(groundBlock);
+    }
+  } else {
+    bobY *= 0.9;
+  }
 
-  camera.position.set(player.pos.x, player.pos.y+player.eye+bobY, player.pos.z);
-  camera.rotation.set(0,0,0);
-  camera.rotateY(player.yaw); camera.rotateX(player.pitch);
+  camera.position.set(player.pos.x, player.pos.y + player.eye + bobY, player.pos.z);
+  camera.rotation.set(0, 0, 0);
+  camera.rotateY(player.yaw);
+  camera.rotateX(player.pitch);
 }
 
 /* =========================================================
@@ -1868,17 +2176,33 @@ function applyLanternState(x,y,z,on){
   const key=voxelKey(x,y,z); if(on) lanternOff.delete(key); else lanternOff.add(key);
   rebuildInteractiveCell(x,y,z);
 }
+const pendingOptimisticEdits=new Map();
+const pendingOptimisticDoors=new Map();
+const pendingOptimisticLights=new Map();
+function recordOptimisticEdit(x,y,z,previousId,optimisticId){
+  const k=`${x},${y},${z}`;
+  pendingOptimisticEdits.set(k,{x,y,z,previousId,optimisticId,time:Date.now()});
+  if(pendingOptimisticEdits.size>250){
+    const cutoff=Date.now()-15000;
+    for(const [key,item] of pendingOptimisticEdits){ if(item.time<cutoff) pendingOptimisticEdits.delete(key); }
+  }
+}
+
 function toggleDoorAt(x,y,z){
   const open=!openDoors.has(voxelKey(x,y,z));
-  if(multiplayer.connected) multiplayer.send({type:'doorToggle',x,y,z});
-  else { applyDoorState(x,y,z,open); Snd.click(); toast(open?'Door opened':'Door closed'); }
-  swing=1;
+  applyDoorState(x,y,z,open); Snd.door(open); toast(open?'Door opened':'Door closed'); swing=1;
+  if(multiplayer.connected){
+    pendingOptimisticDoors.set(`${x},${y},${z}`,{x,y,z,prev:!open,cur:open,time:Date.now()});
+    multiplayer.send({type:'doorToggle',x,y,z});
+  }
 }
 function toggleLanternAt(x,y,z){
   const on=lanternOff.has(voxelKey(x,y,z));
-  if(multiplayer.connected) multiplayer.send({type:'lightToggle',x,y,z});
-  else { applyLanternState(x,y,z,on); Snd.click(); toast(on?'Lantern ON':'Lantern OFF'); }
-  swing=1;
+  applyLanternState(x,y,z,on); Snd.click(); toast(on?'Lantern ON':'Lantern OFF'); swing=1;
+  if(multiplayer.connected){
+    pendingOptimisticLights.set(`${x},${y},${z}`,{x,y,z,prev:!on,cur:on,time:Date.now()});
+    multiplayer.send({type:'lightToggle',x,y,z});
+  }
 }
 
 const openObjectKeys=new Set();
@@ -1949,10 +2273,18 @@ function objectActionLabel(type){
 function updateInteractionHint(){
   if(!interactionHintEl) return;
   let text='';
-  if(objectTarget){ text=(isMobileDevice?'TAP':'RIGHT CLICK')+' · '+objectActionLabel(objectTarget.type)+' · '+objectTarget.label.toUpperCase(); }
-  else if(target){
+  if(objectTarget){
+    text=(isMobileDevice?'TAP':'RIGHT CLICK')+' · '+objectActionLabel(objectTarget.type)+' · '+objectTarget.label.toUpperCase();
+  } else if(target){
     const key=BLOCKS[target.id]?.key;
-    if(['door','lantern','chest','crate','barrel'].includes(key)) text=(isMobileDevice?'TAP':'RIGHT CLICK')+' · '+objectActionLabel(key);
+    if(['door','lantern','chest','crate','barrel'].includes(key)){
+      text=(isMobileDevice?'TAP':'RIGHT CLICK')+' · '+objectActionLabel(key);
+    } else if(multiplayer.connected){
+      const access=canEditAt(target.x,target.z,'build');
+      if(!access.ok){
+        text=access.reason==='claim_required'?'UNCLAIMED LAND · CLAIM REQUIRED TO BUILD':'PROTECTED CLAIM · NO BUILD PERMISSION';
+      }
+    }
   }
   interactionHintEl.textContent=text; interactionHintEl.classList.toggle('show',!!text);
 }
@@ -1962,8 +2294,20 @@ function tryPlace(){
   if([BID.chest,BID.crate,BID.barrel].includes(target.id)){
     interactWithObject({type:BLOCKS[target.id].key,x:target.x,y:target.y,z:target.z}); return;
   }
-  if(target.id===BID.door){ toggleDoorAt(target.x,target.y,target.z); return; }
-  if(target.id===BID.lantern){ toggleLanternAt(target.x,target.y,target.z); return; }
+  if(target.id===BID.door){
+    if(multiplayer.connected){
+      const access=canEditAt(target.x,target.z,'use');
+      if(!access.ok){ toast(access.message); return; }
+    }
+    toggleDoorAt(target.x,target.y,target.z); return;
+  }
+  if(target.id===BID.lantern){
+    if(multiplayer.connected){
+      const access=canEditAt(target.x,target.z,'use');
+      if(!access.ok){ toast(access.message); return; }
+    }
+    toggleLanternAt(target.x,target.y,target.z); return;
+  }
   const nx=target.x+target.nx, ny=target.y+target.ny, nz=target.z+target.nz;
   if(ny<1||ny>=H) return;
   const cur=getBlock(nx,ny,nz);
@@ -1971,23 +2315,48 @@ function tryPlace(){
   // don't place inside the player
   const h=player.half, p=player.pos;
   if(nx+1>p.x-h && nx<p.x+h && nz+1>p.z-h && nz<p.z+h && ny+1>p.y && ny<p.y+player.height) return;
+
   if(multiplayer.connected){
-    multiplayer.send({type:'blockPlace',x:nx,y:ny,z:nz,id:hotbar[slot],oldId:cur});
-    swing=1; return;
+    const access=canEditAt(nx,nz,'build');
+    if(!access.ok){
+      toast(access.message);
+      return;
+    }
+    const placedId=hotbar[slot];
+    recordOptimisticEdit(nx,ny,nz,cur,placedId);
+    setBlock(nx,ny,nz,placedId);
+    Snd.place(placedId);
+    swing=1;
+    multiplayer.send({type:'blockPlace',x:nx,y:ny,z:nz,id:placedId,oldId:cur});
+    return;
   }
-  if(setBlock(nx,ny,nz,hotbar[slot])){ Snd.place(); swing=1; }
+  const placedId=hotbar[slot];
+  if(setBlock(nx,ny,nz,placedId)){ Snd.place(placedId); swing=1; }
 }
 function tryBreak(){
   if(!target) return;
   const bd=BLOCKS[target.id];
   if(bd.unbreakable){ toast("Bedrock cannot be broken"); return; }
+  const prevId=target.id;
   if(multiplayer.connected){
-    multiplayer.send({type:'blockBreak',x:target.x,y:target.y,z:target.z,oldId:target.id});
-    swing=1; mineTarget=null; mineProgress=0; creativeCD=0.16; return;
+    const access=canEditAt(target.x,target.z,'build');
+    if(!access.ok){
+      toast(access.message);
+      mineTarget=null; mineProgress=0;
+      if(mineBar) mineBar.style.display='none';
+      return;
+    }
+    recordOptimisticEdit(target.x,target.y,target.z,prevId,AIR);
+    spawnParticles(target.x,target.y,target.z,prevId);
+    setBlock(target.x,target.y,target.z,AIR);
+    Snd.break_(prevId);
+    swing=1; mineTarget=null; mineProgress=0; creativeCD=0.16;
+    multiplayer.send({type:'blockBreak',x:target.x,y:target.y,z:target.z,oldId:prevId});
+    return;
   }
   spawnParticles(target.x,target.y,target.z,target.id);
   setBlock(target.x,target.y,target.z,AIR);
-  Snd.break_();
+  Snd.break_(prevId);
   swing=1; mineTarget=null; mineProgress=0; creativeCD=0.16;
 }
 
@@ -2715,6 +3084,29 @@ function invalidateClaimWorldVisuals(){ claimWorldVisualKey=''; }
 function worldClaimAt(x,z){
   return knownClaims.find(claim=>x>=claim.x&&x<claim.x+16&&z>=claim.z&&z<claim.z+16)||null;
 }
+function canEditAt(x,z,permission='build'){
+  if(!multiplayer.connected) return {ok:true};
+  const claim=worldClaimAt(x,z);
+  if(!claim){
+    return {ok:false,reason:'claim_required',message:'You must claim this 16×16 parcel before building'};
+  }
+  if(claim.marketLocked){
+    return {ok:false,reason:'property_locked',message:'This Property is locked while listed for sale'};
+  }
+  const myId=multiplayer.id;
+  const isOwner=claim.ownerId===myId;
+  const isCoOwner=(claim.coOwners||[]).some(c=>c.playerId===myId);
+  const member=(claim.members||[]).find(m=>m.playerId===myId);
+  const hasPerm=isOwner||isCoOwner||(permission==='build'?!!member?.build:!!member?.use);
+  if(!hasPerm){
+    return {
+      ok:false,
+      reason:'no_permission',
+      message:permission==='build'?`Protected Claim (${claim.ownerName||'Private'}) · No build permission`:'Private Claim · Use restricted'
+    };
+  }
+  return {ok:true,claim};
+}
 function terrainVisualY(x,z){
   const column=sampleColumn(Math.floor(x),Math.floor(z));
   return Number.isFinite(Number(column?.h))?Number(column.h)+.12:SEA+.12;
@@ -2810,7 +3202,7 @@ const multiplayer={
     if(m.type==='worldState'){ const state=m.world||{}; if(state.rentals)rentals=state.rentals; if(Array.isArray(state.companies))companies=state.companies; if(Array.isArray(state.landAuctions))landAuctions=state.landAuctions; enterMultiplayerWorld(state); renderRentals?.(); renderCompanies?.(); renderAuctions?.(); return; }
     if(m.type==='storeCatalog'){ prefabCatalog=Array.isArray(m.prefabs)?m.prefabs:[]; renderStoreCatalog?.(); return; }
     if(m.type==='propertyReport'){ propertyReport=m.ok?m.report:{ok:false,reason:m.reason||'unavailable',message:m.message||'Property report unavailable'}; renderPropertyReport?.(); return; }
-    if(m.type==='walletUpdate'){ walletState=m.wallet||{balance:0}; updateWalletHud(); renderStoreCatalog?.(); renderMarketListings?.(); return; }
+    if(m.type==='walletUpdate'){ const prevBal=walletState?.balance||0; walletState=m.wallet||{balance:0}; if(walletState.balance!==prevBal&&started)Snd.coin(); updateWalletHud(); renderStoreCatalog?.(); renderMarketListings?.(); return; }
     if(m.type==='marketListings'){ marketListings=Array.isArray(m.listings)?m.listings:[]; marketCommissionRate=Number.isFinite(Number(m.commissionRate))?Number(m.commissionRate):.05; renderMarketListings?.(); return; }
     if(m.type==='businesses'){ businesses=Array.isArray(m.businesses)?m.businesses:[]; renderBusinesses?.(); updateClaimControls?.(); return; }
     if(m.type==='rentals'){ rentals={offers:Array.isArray(m.offers)?m.offers:[],contracts:Array.isArray(m.contracts)?m.contracts:[]}; renderRentals?.(); return; }
@@ -2883,15 +3275,38 @@ const multiplayer={
     if(m.type==='doorState'){ applyDoorState(Number(m.x)||0,Number(m.y)||0,Number(m.z)||0,!!m.open); return; }
     if(m.type==='lightState'){ applyLanternState(Number(m.x)||0,Number(m.y)||0,Number(m.z)||0,!!m.on); return; }
     if(m.type==='blockUpdate'){
-      if(Number.isInteger(m.x)&&Number.isInteger(m.y)&&Number.isInteger(m.z)) applyNetworkBlock(m.x,m.y,m.z,clamp(Number(m.id)||0,0,BLOCKS.length-1));
+      if(Number.isInteger(m.x)&&Number.isInteger(m.y)&&Number.isInteger(m.z)){
+        const k=`${m.x},${m.y},${m.z}`;
+        pendingOptimisticEdits.delete(k);
+        const targetId=clamp(Number(m.id)||0,0,BLOCKS.length-1);
+        if(getBlock(m.x,m.y,m.z)!==targetId) applyNetworkBlock(m.x,m.y,m.z,targetId);
+      }
       return;
     }
-    if(m.type==='editRejected'){ addMpChat('Server rejected block edit: '+(m.reason||'not allowed')); return; }
-    if(m.type==='objectInteractAccepted'){ openObjectPanel(m.object,{x:Number(m.x)+.5,y:Number(m.y)+.5,z:Number(m.z)+.5}); return; }
-    if(m.type==='objectInteractRejected'){ toast(m.message||'Object interaction rejected'); return; }
-    if(m.type==='objectState'){ if(m.by!==this.id) addMpChat('A player interacted with '+String(m.object||'object')); return; }
-    if(m.type==='npcPropertyAdded'){ addMpChat('NPC Buyback added a Property to the world inventory'); return; }
-    if(m.type==='permissionRejected'){ addMpChat(m.message||'Claim permission required'); toast(m.message||'Claim permission required'); closeObjectPanel?.(); return; }
+    if(m.type==='editRejected'||m.type==='permissionRejected'){
+      if(Number.isInteger(m.x)&&Number.isInteger(m.y)&&Number.isInteger(m.z)){
+        const k=`${m.x},${m.y},${m.z}`;
+        const pending=pendingOptimisticEdits.get(k);
+        if(pending){
+          pendingOptimisticEdits.delete(k);
+          setBlock(m.x,m.y,m.z,pending.previousId);
+        }
+        const pendingDoor=pendingOptimisticDoors.get(k);
+        if(pendingDoor){
+          pendingOptimisticDoors.delete(k);
+          applyDoorState(m.x,m.y,m.z,pendingDoor.prev);
+        }
+        const pendingLight=pendingOptimisticLights.get(k);
+        if(pendingLight){
+          pendingOptimisticLights.delete(k);
+          applyLanternState(m.x,m.y,m.z,pendingLight.prev);
+        }
+      }
+      addMpChat(m.message||(m.reason?'Action rejected: '+m.reason:'Action not permitted'));
+      toast(m.message||(m.reason?'Rejected: '+m.reason:'Permission required'));
+      closeObjectPanel?.();
+      return;
+    }
     if(m.type==='worldTime'){ dayTime=Number(m.dayTime)||0; return; }
     if(m.type==='serverMode'){
       player.mode=m.mode==='survival'?'survival':'creative';
@@ -4403,18 +4818,35 @@ function frame(){
 
     const voxelHit=raycastVoxel(), propHit=raycastInteractiveProp();
     target=voxelHit; objectTarget=(propHit&&(!voxelHit||propHit.distance<voxelHit.distance))?propHit:null;
+    const crosshairEl = document.getElementById('crosshair');
     if(objectTarget){
       selBox.visible=false;
+      if(crosshairEl){ crosshairEl.classList.add('interact'); crosshairEl.classList.add('in-reach'); }
     }else if(target){
       selBox.visible=true;
       selBox.position.set(target.x+0.5,target.y+0.5,target.z+0.5);
-    }else selBox.visible=false;
+      const canEdit=!multiplayer.connected||canEditAt(target.x,target.z,'build').ok;
+      selBox.material.color.setHex(canEdit?0x000000:0xff3838);
+      selBox.material.opacity=canEdit?0.65:0.85;
+      if(crosshairEl){ crosshairEl.classList.remove('interact'); crosshairEl.classList.add('in-reach'); }
+    }else{
+      selBox.visible=false;
+      if(crosshairEl){ crosshairEl.classList.remove('interact'); crosshairEl.classList.remove('in-reach'); }
+    }
     updateInteractionHint();
 
     // mining
     if(mineHeld && target){
       const bd=BLOCKS[target.id];
-      if(bd.unbreakable){ mineBar.style.display='none'; mineTarget=null; }
+      const canEdit=!multiplayer.connected||canEditAt(target.x,target.z,'build').ok;
+      if(bd.unbreakable||!canEdit){
+        mineBar.style.display='none';
+        mineTarget=null;
+        if(!canEdit&&creativeCD<=0){
+          toast(canEditAt(target.x,target.z,'build').message);
+          creativeCD=1.2;
+        }
+      }
       else if(player.mode==='creative'){
         mineBar.style.display='none';
         creativeCD-=dt;
