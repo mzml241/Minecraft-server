@@ -17,7 +17,11 @@ test('client and server expose the same authoritative physics contract', () => {
   assert.match(server, /serverPlayerGrounded\(/);
   assert.match(server, /serverPlayerInWater\(/);
   assert.match(server, /serverAutoStepPathClear\(/);
+  assert.match(server, /horizontalAllowance/);
+  assert.match(server, /verticalAllowance/);
+  assert.match(server, /downwardSpeed/);
   assert.match(client, /moveWithAutoStep\(/);
+  assert.match(client, /stepVisualOffset/);
   assert.match(client, /objectInteractAccepted/);
   assert.match(client, /objectInteractRejected/);
 });

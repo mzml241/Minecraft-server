@@ -3086,7 +3086,7 @@ function hardReset(newSeed=true){
   chunks.clear(); openDoors.clear(); lanternOff.clear();
   markMapSnapshotsDirty();
   if(newSeed){ overrides.clear(); player.pos.copy(findSpawn()); }
-  player.vel.set(0,0,0); player.onGround=false;
+  player.vel.set(0,0,0); player.onGround=false; player.stepVisualOffset=0; player.autoStepUntil=0;
   buildHotbar(); setHandBlock(hotbar[slot]);
   loadQueue.length=0; initialLoad=true; queueCX=1e9; queueCZ=1e9; queueDirty=true;
 }
@@ -3109,7 +3109,7 @@ const remotePlayers=new Map();
 function applyMultiplayerSpawn(spawn){
   if(!spawn||!Number.isFinite(Number(spawn.x))||!Number.isFinite(Number(spawn.z))) return false;
   const x=Number(spawn.x),z=Number(spawn.z),y=Number.isFinite(Number(spawn.y))?Number(spawn.y):SEA+8;
-  spawnPoint.set(x,y,z); player.pos.set(x,y,z); player.vel.set(0,0,0); player.onGround=false; return true;
+  spawnPoint.set(x,y,z); player.pos.set(x,y,z); player.vel.set(0,0,0); player.onGround=false; player.stepVisualOffset=0; player.autoStepUntil=0; return true;
 }
 let myClaim=null, knownClaims=[], knownPlayers=[], npcProperties=[], claimSelectionMode=false, claimPreview=null, permissionPanelOpen=false, landInspectMode=false, landQuote=null, propertyReport=null, marketListings=[], marketCommissionRate=.05, prefabCatalog=[], prefabPreview=null, prefabGhost=null, businessTerritorySelection=null;
 function applyClaimSnapshot(claim,claims){

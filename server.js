@@ -2406,14 +2406,26 @@ function serverPlayerMotionValid(client,nx,ny,nz,now,motion={}){
   const jumpEdge=motion.jump===true&&client.jump!==true;
   const movement=PHYSICS_CONFIG.movement;
   const maxSpeed=isFlying?movement.flightSpeed:(inWater?movement.waterSpeed:(motion.sprint===true?movement.sprintSpeed:movement.walkSpeed));
-  const maxDistance=maxSpeed*elapsed+1.15;
-  const dx=nx-client.x,dy=ny-client.y,dz=nz-client.z,dist=Math.hypot(dx,dy,dz);
-  if(dist>maxDistance) return false;
+  const dx=nx-client.x,dy=ny-client.y,dz=nz-client.z;
+
+  // Validate horizontal and vertical motion independently. The old single
+  // Euclidean distance limit treated the horizontal walk speed as the limit
+  // for Y as well, so a legitimate fast fall (up to -55) or flight with
+  // forward + ascent could be rejected and snapped back by the client.
+  // These are still strict envelopes; the final swept voxel path below is
+  // always required before a state is accepted.
+  const horizontalAllowance=maxSpeed*elapsed+0.75;
+  if(Math.hypot(dx,dz)>horizontalAllowance) return false;
+  const upwardSpeed=isFlying?movement.flightSpeed*.8:(startInWater||inWater?3.6:9.4);
+  const downwardSpeed=isFlying?movement.flightSpeed*.8:(startInWater||inWater?3.5:55);
+  const verticalAllowance=(dy>=0?upwardSpeed:downwardSpeed)*elapsed+0.75;
+  if(Math.abs(dy)>verticalAllowance) return false;
+
   // A jump impulse may only begin while grounded (or while swimming). The
   // reported jump/onGround bits are state hints; the server derives the
-  // actual support voxel before accepting the impulse.
+  // actual support voxel before accepting the impulse. Once airborne, the
+  // vertical envelope above permits the rest of the same jump arc.
   if(jumpEdge&&!isFlying&&!startInWater&&!stepGrounded) return false;
-  if(!isFlying&&!inWater&&dy>0.62&&!stepGrounded&&!startInWater) return false;
 
   const directPathClear=serverMotionPathClear(client.x,client.y,client.z,nx,ny,nz);
   if(directPathClear) return true;
