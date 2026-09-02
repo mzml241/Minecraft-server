@@ -1,13 +1,12 @@
 # VoxelCraft Multiplayer Server
 
-This is the multiplayer-only deployment for the full local/singleplayer `index.html` client. The local version remains available at the repository root; `npm start` generates a separate server shell at `server/public/index.html` that hides local-world controls and connects only to the current server origin.
+This repository contains the multiplayer deployment for VoxelCraft, a browser-based voxel sandbox (not a Vanilla/Paper/Bukkit Minecraft server). The portable local/singleplayer client source is kept in `client/index.html`; `npm start` generates `public/index.html`, a multiplayer-only shell that hides local-world controls and connects to the current server origin.
 
 ## Run locally
 
 ```bash
-cd server
-npm install
-ADMIN_TOKEN=use-a-long-secret SESSION_SECRET=another-long-secret npm start
+npm ci
+ADMIN_TOKEN=use-a-long-secret-long-enough SESSION_SECRET=another-long-secret-long-enough npm start
 ```
 
 The server will listen on `http://localhost:3000`.
@@ -16,7 +15,7 @@ The server will listen on `http://localhost:3000`.
 - Admin panel: `http://localhost:3000/admin`
 - WebSocket: `ws://localhost:3000/ws`
 
-The default token is `change-me`; set both `ADMIN_TOKEN` and `SESSION_SECRET` before exposing the server.
+For local development, omitted credentials use a temporary admin token (`change-me`) and an ephemeral session secret. Never expose that configuration publicly. Production requires an explicit `ADMIN_TOKEN` of at least 24 characters and a separate `SESSION_SECRET` of at least 32 characters. The admin API accepts the token only in the `x-admin-token` header, never in a URL.
 
 ## LAN
 
@@ -40,26 +39,26 @@ The client automatically changes the same-origin WebSocket to `wss://game.exampl
 
 ## Deploy to Render
 
-A ready-to-use `render.yaml` is included in this directory. In Render, create a Blueprint from the repository and select `server/render.yaml`, or create a Node Web Service with:
+A ready-to-use `render.yaml` is included in this repository. In Render, create a Blueprint from the repository and select `render.yaml`, or create a Node Web Service with:
 
 ```text
-Root Directory: server
+Root Directory: .
 Build Command: npm ci --omit=dev
 Start Command: npm start
 Health Check Path: /healthz
 ```
 
-The Blueprint uses a Persistent Disk at `/var/data` and sets `DATA_DIR=/var/data`, so Accounts, Wallet/Ledger, Spawn Reservations and World JSON survive deploys and restarts. It also generates `SESSION_SECRET` and `ADMIN_TOKEN`. Keep the generated secrets private. A Persistent Disk requires a paid Render service plan.
+The Blueprint uses a Persistent Disk at `/var/data` and sets `DATA_DIR=/var/data`, so Accounts, Wallet/Ledger, Spawn Reservations and World JSON survive deploys and restarts. It also generates `SESSION_SECRET` and `ADMIN_TOKEN`. Keep the generated secrets private. A Persistent Disk requires a paid Render service plan. The Blueprint pins Node 22 because the server uses the built-in `node:sqlite` module.
 
-The server binds to `0.0.0.0` and uses Render's `PORT` automatically. The public root serves the multiplayer-only client; the original local version is kept separately in the repository and is not used as the public server shell.
+The server binds to `0.0.0.0` and uses Render's `PORT` automatically. The public root serves the generated multiplayer-only client from `public/index.html`; the source client remains in `client/index.html` and is never modified by the build.
 
 Useful environment variables:
 
 ```text
 PORT=3000
 HOST=0.0.0.0
-ADMIN_TOKEN=use-a-long-secret
-SESSION_SECRET=another-long-secret
+ADMIN_TOKEN=replace-with-a-24-character-minimum-secret
+SESSION_SECRET=replace-with-a-separate-32-character-minimum-secret
 DATA_DIR=/var/data
 WORLD_SEED=18699877
 WORLD_NAME=My World
@@ -68,6 +67,23 @@ MAX_PLAYERS=20
 ```
 
 The server stores worlds as independent JSON files in `DATA_DIR/worlds/` (the default world is `main.json`) and autosaves every 30 seconds plus during shutdown. Backups are written to `DATA_DIR/worlds/backups/` when importing or replacing a world.
+
+## Repository and runtime data
+
+The files in `DATA_DIR` are runtime state, not source code. Account databases, wallets, ledgers, spawn reservations, world saves and backups are intentionally ignored by Git. A fresh checkout creates an empty `main` world and the required files on first start. Set `DATA_DIR` to a persistent location in production (the Render Blueprint uses `/var/data`).
+
+Do not commit passwords, password hashes, world saves or production backups. Use the server export/download endpoint and an external backup policy for operational backups. When upgrading an older checkout, copy its runtime files into the configured `DATA_DIR` before starting; do not add them to Git.
+
+The generated browser bundle is `public/index.html`; edit `client/index.html` and run `npm run build` rather than editing the generated file directly.
+
+## Development checks
+
+```bash
+npm run build
+npm test
+```
+
+The test suite uses a temporary data directory and exercises the generated client shell, health endpoint, public API and WebSocket account flow without modifying repository runtime data. Node.js 22.5.0 or newer is required.
 
 ## Multi-world administration
 
@@ -85,7 +101,7 @@ Switching worlds is global in this MVP, not a per-world lobby: connected clients
 
 `database.json` in `DATA_DIR` is the primary durable account/profile database. It contains the Username, password hash/salt, stable Player ID, display name, Wallet and Claim entitlement state. It is written atomically on account creation, login, Wallet/Ledger changes and server shutdown, so restarting the Node process does not create a new Player. `accounts.json` and `players.json` in the same data directory are kept as readable compatibility mirrors and are automatically migrated when the database is first introduced.
 
-The client normally reconnects to the same server origin and uses the same normalized Username and Password. A different server, a different world folder, or a changed `server` directory is a different database.
+The client normally reconnects to the same server origin and uses the same normalized Username and Password. A different server, a different world folder, or a changed `DATA_DIR` is a different database.
 
 ## Current account and onboarding protocol
 
@@ -150,7 +166,7 @@ The client normally reconnects to the same server origin and uses the same norma
 ## Phase 7 Wallet and NPC buyback
 
 - Player profiles contain a persistent Wallet with `0 Coin` for new players; wallet state is sent as `walletUpdate`
-- `server/coin-ledger.json` is an append-only server-side ledger for credit and debit transactions
+- `coin-ledger.json` is an append-only server-side ledger for credit and debit transactions
 - `GET /api/wallet?playerId=...` returns the wallet balance and the last 20 ledger rows
 - A `propertySellNpc` WebSocket request pays exactly `80%` of the current Certified Value; only a complete Property can be sold and empty/incomplete Claims are rejected
 - The sale snapshot transfers Land, Building blocks, Objects, and Business License data into `world.npcProperties`
@@ -189,7 +205,7 @@ Business licenses are stored on the complete Property Claim and remain part of t
 
 ### Server-authoritative economics
 
-Every Business Cycle uses the Property’s land `Traffic` and `Demand`, the License `Reputation` and `Capacity` to calculate NPC customers and NPC income. The default cycle interval is 30 seconds and can be changed with `BUSINESS_TICK_MS` (minimum 15 seconds). Salary, Maintenance and Advertising are charged from the owner Wallet through `business_operating_cost`; every credit/debit carries the `businessId` in `server/coin-ledger.json`.
+Every Business Cycle uses the Property’s land `Traffic` and `Demand`, the License `Reputation` and `Capacity` to calculate NPC customers and NPC income. The default cycle interval is 30 seconds and can be changed with `BUSINESS_TICK_MS` (minimum 15 seconds). Salary, Maintenance and Advertising are charged from the owner Wallet through `business_operating_cost`; every credit/debit carries the `businessId` in `coin-ledger.json`.
 
 A Wallet is never allowed to become negative. If operating costs cannot be paid, the Business is marked `suspended`, unpaid cost is accumulated, Reputation decreases, NPC revenue stops and real-player visits are rejected. The next cycle retries the cost, allowing the Business to reopen when the owner has enough Coin.
 

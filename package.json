@@ -4,10 +4,14 @@
   "private": true,
   "description": "LAN and internet server for VoxelCraft",
   "main": "server.js",
+  "engines": {
+    "node": ">=22.5.0"
+  },
   "scripts": {
     "build": "node build-client.js",
     "start": "node build-client.js && node server.js",
-    "dev": "node build-client.js && node --watch server.js"
+    "dev": "node build-client.js && node --watch server.js",
+    "test": "node --test"
   },
   "dependencies": {
     "ws": "^8.18.0"

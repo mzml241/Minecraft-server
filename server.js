@@ -6,13 +6,29 @@ const { WebSocketServer, WebSocket } = require('ws');
 
 const HOST = process.env.HOST || '0.0.0.0';
 const PORT = Number(process.env.PORT || 3000);
-const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'change-me';
+const NODE_ENV = String(process.env.NODE_ENV || 'development').toLowerCase();
+const DEFAULT_ADMIN_TOKEN = 'change-me';
+const ADMIN_TOKEN = String(process.env.ADMIN_TOKEN || DEFAULT_ADMIN_TOKEN);
 // Render's filesystem is ephemeral unless a Persistent Disk is mounted. Keep
 // code/static files beside the app, but make all world/account data movable to
 // DATA_DIR (for example /var/data on Render).
 const DATA_DIR = path.resolve(process.env.DATA_DIR || __dirname);
 const WORLD_DIR = path.join(DATA_DIR, 'worlds');
-const SESSION_SECRET = String(process.env.SESSION_SECRET || ADMIN_TOKEN || 'change-me');
+// Local development gets an ephemeral session secret when no secret is set,
+// while production must use an explicit secret that is independent of the
+// administrator token. This prevents the default fallback from being used on
+// an internet-facing deployment.
+const SESSION_SECRET = String(process.env.SESSION_SECRET || (
+  ADMIN_TOKEN === DEFAULT_ADMIN_TOKEN ? crypto.randomBytes(32).toString('hex') : ADMIN_TOKEN
+));
+if (NODE_ENV === 'production') {
+  if (ADMIN_TOKEN === DEFAULT_ADMIN_TOKEN || ADMIN_TOKEN.length < 24) {
+    throw new Error('ADMIN_TOKEN must be at least 24 characters and must not use the default in production');
+  }
+  if (!process.env.SESSION_SECRET || SESSION_SECRET === ADMIN_TOKEN || SESSION_SECRET.length < 32) {
+    throw new Error('SESSION_SECRET must be an explicit, separate secret of at least 32 characters in production');
+  }
+}
 const SESSION_TTL_MS = Math.max(24 * 60 * 60 * 1000, Number(process.env.SESSION_TTL_MS || 30 * 24 * 60 * 60 * 1000));
 function safeWorldId(value){
   return String(value||'main').toLowerCase().replace(/[^a-z0-9_-]+/g,'-').replace(/^-+|-+$/g,'').slice(0,48) || 'main';
@@ -139,6 +155,42 @@ function profileKeyValid(value){ return !!safeIdentity(value)||/^account:[a-z0-9
 function readJsonFile(filePath,fallback=null){
   try{return fs.existsSync(filePath)?JSON.parse(fs.readFileSync(filePath,'utf8')):fallback;}catch(error){log('JSON load failed:',path.basename(filePath),error.message);return fallback;}
 }
+
+// Replace JSON snapshots atomically so a process interruption cannot leave a
+// truncated account, ledger, reservation or world file behind.
+function atomicWriteJson(filePath, value) {
+  const temporaryPath = `${filePath}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
+  try {
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(temporaryPath, JSON.stringify(value, null, 2));
+    fs.renameSync(temporaryPath, filePath);
+    return true;
+  } catch (error) {
+    try { fs.rmSync(temporaryPath, { force: true }); } catch (cleanupError) {}
+    throw error;
+  }
+}
+
+const AUTH_ATTEMPT_WINDOW_MS = 10 * 60 * 1000;
+const AUTH_ATTEMPT_LIMIT = 20;
+const authAttemptBuckets = new Map();
+function allowAuthAttempt(key) {
+  const now = Date.now();
+  const bucket = authAttemptBuckets.get(key);
+  if (!bucket || now >= bucket.resetAt) {
+    authAttemptBuckets.set(key, { count: 1, resetAt: now + AUTH_ATTEMPT_WINDOW_MS });
+    return true;
+  }
+  if (bucket.count >= AUTH_ATTEMPT_LIMIT) return false;
+  bucket.count += 1;
+  return true;
+}
+const authAttemptCleanup = setInterval(() => {
+  const now = Date.now();
+  for (const [key, bucket] of authAttemptBuckets) if (now >= bucket.resetAt) authAttemptBuckets.delete(key);
+}, AUTH_ATTEMPT_WINDOW_MS);
+authAttemptCleanup.unref?.();
+
 const { DatabaseSync } = require('node:sqlite');
 const SQLITE_DB_PATH = path.join(DATA_DIR, 'voxelcraft.sqlite');
 let sqliteDb = null;
@@ -247,7 +299,7 @@ function initSqliteDatabase() {
 
 function databaseSnapshot(){return {format:'voxelcraft-database',version:1,updatedAt:new Date().toISOString(),accounts:Object.fromEntries(accounts),profiles:Object.fromEntries(playerProfiles)};}
 function saveDatabase(){
-  try{const tmp=`${DATABASE_PATH}.tmp`;fs.writeFileSync(tmp,JSON.stringify(databaseSnapshot(),null,2));fs.renameSync(tmp,DATABASE_PATH);return true;}
+  try{atomicWriteJson(DATABASE_PATH,databaseSnapshot());return true;}
   catch(error){log('Database save failed:',error.message);return false;}
 }
 function databaseSection(section,legacyPath,key){
@@ -293,7 +345,7 @@ function saveAccounts(){
         stmtUpsertAccount.run(acc.username, acc.playerId, acc.passwordHash, acc.passwordSalt, acc.name, acc.createdAt, acc.lastSeen);
       }
     }
-    fs.writeFileSync(ACCOUNT_PATH,JSON.stringify({format:'voxelcraft-accounts',version:1,accounts:Object.fromEntries(accounts)},null,2));saveDatabase();return true;
+    atomicWriteJson(ACCOUNT_PATH,{format:'voxelcraft-accounts',version:1,accounts:Object.fromEntries(accounts)});saveDatabase();return true;
   }
   catch(error){log('Account save failed:',error.message);return false;}
 }
@@ -391,7 +443,7 @@ function savePlayerProfiles() {
       }
     }
     const profiles=Object.fromEntries(playerProfiles);
-    fs.writeFileSync(PLAYER_PROFILE_PATH,JSON.stringify({format:'voxelcraft-player-profiles',version:1,profiles},null,2));
+    atomicWriteJson(PLAYER_PROFILE_PATH,{format:'voxelcraft-player-profiles',version:1,profiles});
     saveDatabase();
   } catch(error) { log('Player profile save failed:',error.message); }
 }
@@ -433,7 +485,7 @@ function loadCoinLedger(){
   }catch(error){ log('Coin ledger load failed:',error.message); }
 }
 function saveCoinLedger(){
-  try{ fs.writeFileSync(LEDGER_PATH,JSON.stringify({format:'voxelcraft-coin-ledger',version:1,transactions:coinLedger},null,2)); return true; }
+  try{ atomicWriteJson(LEDGER_PATH,{format:'voxelcraft-coin-ledger',version:1,transactions:coinLedger}); return true; }
   catch(error){ log('Coin ledger save failed:',error.message); return false; }
 }
 function profileByPlayerId(playerId){ return Array.from(playerProfiles.values()).find(profile=>profile.id===String(playerId||''))||null; }
@@ -505,7 +557,7 @@ function saveSpawnReservations() {
         stmtUpsertReservation.run(identity, resObj.worldId, resObj.x, resObj.y, resObj.z, resObj.playerId, resObj.reservedAt, resObj.expiresAt);
       }
     }
-    fs.writeFileSync(SPAWN_RESERVATION_PATH,JSON.stringify({format:'voxelcraft-spawn-reservations',version:1,reservations:Object.fromEntries(spawnReservations)},null,2));
+    atomicWriteJson(SPAWN_RESERVATION_PATH,{format:'voxelcraft-spawn-reservations',version:1,reservations:Object.fromEntries(spawnReservations)});
   } catch(error) { log('Spawn reservation save failed:',error.message); }
 }
 
@@ -559,7 +611,7 @@ function saveWorldRecord(record) {
   try {
     ensureWorldDir();
     const data = { ...record, savedAt: new Date().toISOString() };
-    fs.writeFileSync(worldPath(record.id), JSON.stringify(data, null, 2));
+    atomicWriteJson(worldPath(record.id),data);
     record.savedAt = data.savedAt;
     return true;
   } catch (error) {
@@ -2207,10 +2259,9 @@ function parseBody(req) {
 }
 
 function authorized(req) {
-  const headerToken = req.headers['x-admin-token'];
-  const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
-  const queryToken = url.searchParams.get('token');
-  return headerToken === ADMIN_TOKEN || queryToken === ADMIN_TOKEN;
+  // Never accept the admin credential in a URL: URLs can be stored in proxy
+  // logs, browser history and Referer headers. The panel sends this header.
+  return req.headers['x-admin-token'] === ADMIN_TOKEN;
 }
 
 function json(res, status, data, headers = {}) {
@@ -2218,7 +2269,6 @@ function json(res, status, data, headers = {}) {
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
     'Cache-Control': 'no-store',
-    'Access-Control-Allow-Origin': '*',
     ...headers
   });
   res.end(text);
@@ -2319,7 +2369,10 @@ async function handleApi(req, res, url) {
   }
   if (url.pathname.startsWith('/api/phase10b/') && req.method === 'POST') {
     try {
-      const body=await parseBody(req), authenticated=authenticateApiPlayer(body);
+      const body=await parseBody(req);
+      const authKey=`http:${req.socket.remoteAddress||'unknown'}`;
+      if(!allowAuthAttempt(authKey)) return json(res,429,{ok:false,reason:'rate_limited',message:'Too many authentication attempts; try again later'});
+      const authenticated=authenticateApiPlayer(body);
       if(!authenticated) return json(res,401,{ok:false,reason:'authentication_required',message:'Username and Password are required; playerId alone is not accepted'});
       const actor={...authenticated,x:Number.isFinite(Number(body.x))?Number(body.x):world.spawn.x,z:Number.isFinite(Number(body.z))?Number(body.z):world.spawn.z,y:Number.isFinite(Number(body.y))?Number(body.y):50};
       let result;
@@ -2535,6 +2588,8 @@ wss.on('connection', (ws, req) => {
       // First login requires Username + Password. A later visit may use the
       // signed remembered-session token issued after that successful login;
       // the password is never stored in the browser.
+      const authKey=`ws:${req.socket.remoteAddress||'unknown'}`;
+      if(!allowAuthAttempt(authKey)) return send(ws,{type:'authRejected',reason:'rate_limited',message:'Too many authentication attempts; try again later'});
       let auth=message.sessionToken?authenticateRememberedSession(message.username,message.sessionToken):{ok:false};
       if(!auth.ok) auth=authenticateAccount(message.username,message.password,message.name);
       if(!auth.ok) return send(ws,{type:'authRejected',reason:auth.reason,message:auth.message});
