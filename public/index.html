@@ -410,6 +410,7 @@
           <div><b>W A S D</b> — move</div>
           <div><b>MOUSE</b> — look</div>
           <div><b>SPACE</b> — jump / swim</div>
+          <div><b>J</b> — toggle auto-jump (auto step up blocks)</div>
           <div><b>2× SPACE</b> — toggle fly</div>
           <div><b>SHIFT</b> — sprint / descend</div>
           <div><b>LEFT CLICK</b> — mine block</div>
@@ -1912,6 +1913,8 @@ const input = { fwd: 0, side: 0, jump: false, down: false };
 
 const EPS = 0.0001;
 const STEP_HEIGHT = 1.05;
+let autoStepEnabled = true; // Auto-Jump: automatically step up full blocks while walking (toggle with J)
+try { if (localStorage.getItem('voxelcraftAutoStep') === '0') autoStepEnabled = false; } catch (error) {}
 
 function isAABBColliding(px, py, pz) {
   const h = player.half;
@@ -1980,7 +1983,7 @@ function moveAxisPrecise(axis, amount) {
 
 function moveWithAutoStep(dx, dz) {
   const p = player.pos;
-  const canAutoStep = player.onGround && !player.fly && !player.inWater;
+  const canAutoStep = autoStepEnabled && player.onGround && !player.fly && !player.inWater;
 
   if (canAutoStep) {
     const startX = p.x, startY = p.y, startZ = p.z;
@@ -4550,6 +4553,11 @@ addEventListener('keydown',e=>{
   if(e.code==='KeyF'){
     if(player.mode!=='creative'){ toast('Flight is only available in Creative'); return; }
     player.fly=!player.fly; player.vel.y=0; toast(player.fly?'Flight ON':'Flight OFF');
+  }
+  if(e.code==='KeyJ'){
+    autoStepEnabled=!autoStepEnabled;
+    try{ localStorage.setItem('voxelcraftAutoStep', autoStepEnabled?'1':'0'); }catch(error){}
+    toast(autoStepEnabled?'Auto-Jump ON':'Auto-Jump OFF');
   }
   if(e.code==='KeyT'){
     if(multiplayer.connected){ toast('Time is controlled by the server'); return; }
