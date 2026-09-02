@@ -3,4 +3,14 @@ node_modules/
 *.sqlite-wal
 *.sqlite-shm
 *.sqlite-journal
+*.tmp
 .DS_Store
+
+# Runtime state is created under DATA_DIR and must not be committed.
+/accounts.json
+/database.json
+/players.json
+/coin-ledger.json
+/spawn-reservations.json
+/worlds/*.json
+/worlds/backups/

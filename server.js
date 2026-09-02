@@ -6,19 +6,57 @@ const { WebSocketServer, WebSocket } = require('ws');
 
 const HOST = process.env.HOST || '0.0.0.0';
 const PORT = Number(process.env.PORT || 3000);
-const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'change-me';
+const NODE_ENV = String(process.env.NODE_ENV || 'development').toLowerCase();
+const DEFAULT_ADMIN_TOKEN = 'change-me';
+const ADMIN_TOKEN = String(process.env.ADMIN_TOKEN || DEFAULT_ADMIN_TOKEN);
 // Render's filesystem is ephemeral unless a Persistent Disk is mounted. Keep
 // code/static files beside the app, but make all world/account data movable to
 // DATA_DIR (for example /var/data on Render).
 const DATA_DIR = path.resolve(process.env.DATA_DIR || __dirname);
 const WORLD_DIR = path.join(DATA_DIR, 'worlds');
-const SESSION_SECRET = String(process.env.SESSION_SECRET || ADMIN_TOKEN || 'change-me');
+// Local development gets an ephemeral session secret when no secret is set,
+// while production must use an explicit secret that is independent of the
+// administrator token. This prevents the default fallback from being used on
+// an internet-facing deployment.
+const SESSION_SECRET = String(process.env.SESSION_SECRET || (
+  ADMIN_TOKEN === DEFAULT_ADMIN_TOKEN ? crypto.randomBytes(32).toString('hex') : ADMIN_TOKEN
+));
+if (NODE_ENV === 'production') {
+  if (ADMIN_TOKEN === DEFAULT_ADMIN_TOKEN || ADMIN_TOKEN.length < 24) {
+    throw new Error('ADMIN_TOKEN must be at least 24 characters and must not use the default in production');
+  }
+  if (!process.env.SESSION_SECRET || SESSION_SECRET === ADMIN_TOKEN || SESSION_SECRET.length < 32) {
+    throw new Error('SESSION_SECRET must be an explicit, separate secret of at least 32 characters in production');
+  }
+}
 const SESSION_TTL_MS = Math.max(24 * 60 * 60 * 1000, Number(process.env.SESSION_TTL_MS || 30 * 24 * 60 * 60 * 1000));
 function safeWorldId(value){
   return String(value||'main').toLowerCase().replace(/[^a-z0-9_-]+/g,'-').replace(/^-+|-+$/g,'').slice(0,48) || 'main';
 }
 function worldPath(id){ return path.join(WORLD_DIR, `${safeWorldId(id)}.json`); }
 const WORLD_HEIGHT = 80;
+const SEA_LEVEL = 30;
+const MAX_FLIGHT_HEIGHT = 1000;
+// This is sent to every client so movement/collision constants are part of the
+// protocol rather than two silently drifting implementations.
+const PHYSICS_CONFIG = Object.freeze({
+  version: 1,
+  chunkSize: 16,
+  worldHeight: WORLD_HEIGHT,
+  seaLevel: SEA_LEVEL,
+  maxFlightHeight: MAX_FLIGHT_HEIGHT,
+  player: Object.freeze({ height: 1.8, halfWidth: 0.3, stepHeight: 1.05 }),
+  movement: Object.freeze({
+    walkSpeed: 4.4,
+    sprintSpeed: 6.6,
+    waterSpeed: 3.4,
+    flightSpeed: 13,
+    creativeMaxSpeed: 36,
+    survivalMaxSpeed: 18,
+    tickIntervalMs: 50,
+    autoStep: true
+  })
+});
 // Keep this in sync with the current client block registry (IDs 1 through 51).
 const MAX_BLOCK_ID = 51;
 const MAX_PLAYERS = Number(process.env.MAX_PLAYERS || 20);
@@ -139,6 +177,42 @@ function profileKeyValid(value){ return !!safeIdentity(value)||/^account:[a-z0-9
 function readJsonFile(filePath,fallback=null){
   try{return fs.existsSync(filePath)?JSON.parse(fs.readFileSync(filePath,'utf8')):fallback;}catch(error){log('JSON load failed:',path.basename(filePath),error.message);return fallback;}
 }
+
+// Replace JSON snapshots atomically so a process interruption cannot leave a
+// truncated account, ledger, reservation or world file behind.
+function atomicWriteJson(filePath, value) {
+  const temporaryPath = `${filePath}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
+  try {
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(temporaryPath, JSON.stringify(value, null, 2));
+    fs.renameSync(temporaryPath, filePath);
+    return true;
+  } catch (error) {
+    try { fs.rmSync(temporaryPath, { force: true }); } catch (cleanupError) {}
+    throw error;
+  }
+}
+
+const AUTH_ATTEMPT_WINDOW_MS = 10 * 60 * 1000;
+const AUTH_ATTEMPT_LIMIT = 20;
+const authAttemptBuckets = new Map();
+function allowAuthAttempt(key) {
+  const now = Date.now();
+  const bucket = authAttemptBuckets.get(key);
+  if (!bucket || now >= bucket.resetAt) {
+    authAttemptBuckets.set(key, { count: 1, resetAt: now + AUTH_ATTEMPT_WINDOW_MS });
+    return true;
+  }
+  if (bucket.count >= AUTH_ATTEMPT_LIMIT) return false;
+  bucket.count += 1;
+  return true;
+}
+const authAttemptCleanup = setInterval(() => {
+  const now = Date.now();
+  for (const [key, bucket] of authAttemptBuckets) if (now >= bucket.resetAt) authAttemptBuckets.delete(key);
+}, AUTH_ATTEMPT_WINDOW_MS);
+authAttemptCleanup.unref?.();
+
 const { DatabaseSync } = require('node:sqlite');
 const SQLITE_DB_PATH = path.join(DATA_DIR, 'voxelcraft.sqlite');
 let sqliteDb = null;
@@ -247,7 +321,7 @@ function initSqliteDatabase() {
 
 function databaseSnapshot(){return {format:'voxelcraft-database',version:1,updatedAt:new Date().toISOString(),accounts:Object.fromEntries(accounts),profiles:Object.fromEntries(playerProfiles)};}
 function saveDatabase(){
-  try{const tmp=`${DATABASE_PATH}.tmp`;fs.writeFileSync(tmp,JSON.stringify(databaseSnapshot(),null,2));fs.renameSync(tmp,DATABASE_PATH);return true;}
+  try{atomicWriteJson(DATABASE_PATH,databaseSnapshot());return true;}
   catch(error){log('Database save failed:',error.message);return false;}
 }
 function databaseSection(section,legacyPath,key){
@@ -293,7 +367,7 @@ function saveAccounts(){
         stmtUpsertAccount.run(acc.username, acc.playerId, acc.passwordHash, acc.passwordSalt, acc.name, acc.createdAt, acc.lastSeen);
       }
     }
-    fs.writeFileSync(ACCOUNT_PATH,JSON.stringify({format:'voxelcraft-accounts',version:1,accounts:Object.fromEntries(accounts)},null,2));saveDatabase();return true;
+    atomicWriteJson(ACCOUNT_PATH,{format:'voxelcraft-accounts',version:1,accounts:Object.fromEntries(accounts)});saveDatabase();return true;
   }
   catch(error){log('Account save failed:',error.message);return false;}
 }
@@ -391,7 +465,7 @@ function savePlayerProfiles() {
       }
     }
     const profiles=Object.fromEntries(playerProfiles);
-    fs.writeFileSync(PLAYER_PROFILE_PATH,JSON.stringify({format:'voxelcraft-player-profiles',version:1,profiles},null,2));
+    atomicWriteJson(PLAYER_PROFILE_PATH,{format:'voxelcraft-player-profiles',version:1,profiles});
     saveDatabase();
   } catch(error) { log('Player profile save failed:',error.message); }
 }
@@ -433,7 +507,7 @@ function loadCoinLedger(){
   }catch(error){ log('Coin ledger load failed:',error.message); }
 }
 function saveCoinLedger(){
-  try{ fs.writeFileSync(LEDGER_PATH,JSON.stringify({format:'voxelcraft-coin-ledger',version:1,transactions:coinLedger},null,2)); return true; }
+  try{ atomicWriteJson(LEDGER_PATH,{format:'voxelcraft-coin-ledger',version:1,transactions:coinLedger}); return true; }
   catch(error){ log('Coin ledger save failed:',error.message); return false; }
 }
 function profileByPlayerId(playerId){ return Array.from(playerProfiles.values()).find(profile=>profile.id===String(playerId||''))||null; }
@@ -505,7 +579,7 @@ function saveSpawnReservations() {
         stmtUpsertReservation.run(identity, resObj.worldId, resObj.x, resObj.y, resObj.z, resObj.playerId, resObj.reservedAt, resObj.expiresAt);
       }
     }
-    fs.writeFileSync(SPAWN_RESERVATION_PATH,JSON.stringify({format:'voxelcraft-spawn-reservations',version:1,reservations:Object.fromEntries(spawnReservations)},null,2));
+    atomicWriteJson(SPAWN_RESERVATION_PATH,{format:'voxelcraft-spawn-reservations',version:1,reservations:Object.fromEntries(spawnReservations)});
   } catch(error) { log('Spawn reservation save failed:',error.message); }
 }
 
@@ -559,7 +633,7 @@ function saveWorldRecord(record) {
   try {
     ensureWorldDir();
     const data = { ...record, savedAt: new Date().toISOString() };
-    fs.writeFileSync(worldPath(record.id), JSON.stringify(data, null, 2));
+    atomicWriteJson(worldPath(record.id),data);
     record.savedAt = data.savedAt;
     return true;
   } catch (error) {
@@ -752,6 +826,11 @@ function playerSummary(client) {
     yaw: client.yaw,
     pitch: client.pitch,
     mode: client.mode,
+    fly: client.fly,
+    sprint: client.sprint,
+    inWater: client.inWater,
+    onGround: client.onGround,
+    jump: client.jump,
     selectedBlock: client.selectedBlock,
     health:client.health,
     maxHealth:100,
@@ -863,6 +942,23 @@ class ServerMapNoise {
   }
   fade(t){ return t*t*t*(t*(t*6-15)+10); }
   g2(h,x,y){ const u=(h&1)?-x:x,v=(h&2)?-y:y; return u+v; }
+  g3(h,x,y,z){
+    switch(h&15){
+      case 0:return x+y; case 1:return -x+y; case 2:return x-y; case 3:return -x-y;
+      case 4:return x+z; case 5:return -x+z; case 6:return x-z; case 7:return -x-z;
+      case 8:return y+z; case 9:return -y+z; case 10:return y-z; case 11:return -y-z;
+      case 12:return x+y; case 13:return -y+z; case 14:return -x+y; default:return -y-z;
+    }
+  }
+  n3(x,y,z){
+    const fx=Math.floor(x),fy=Math.floor(y),fz=Math.floor(z),X=fx&255,Y=fy&255,Z=fz&255;
+    const xf=x-fx,yf=y-fy,zf=z-fz,p=this.p,u=this.fade(xf),v=this.fade(yf),w=this.fade(zf);
+    const A=p[X]+Y,AA=p[A]+Z,AB=p[A+1]+Z,B=p[X+1]+Y,BA=p[B]+Z,BB=p[B+1]+Z;
+    const x00=(a,b,c,d)=>this.g3(a,xf,b,c)*(1-u)+this.g3(d,xf-1,b,c)*u;
+    const y0=x00(p[AA],yf,zf,p[BA])*(1-v)+x00(p[AB],yf-1,zf,p[BB])*v;
+    const y1=x00(p[AA+1],yf,zf-1,p[BA+1])*(1-v)+x00(p[AB+1],yf-1,zf-1,p[BB+1])*v;
+    return (y0*(1-w)+y1*w);
+  }
   n2(x,y){
     const fx=Math.floor(x),fy=Math.floor(y),X=fx&255,Y=fy&255,xf=x-fx,yf=y-fy,p=this.p;
     const u=this.fade(xf),v=this.fade(yf),aa=p[p[X]+Y],ab=p[p[X]+Y+1],ba=p[p[X+1]+Y],bb=p[p[X+1]+Y+1];
@@ -887,14 +983,14 @@ function serverMapColumn(x,z){
   const r=n.b.fbm2(x*.0055-42.1,z*.0055+88.4,3),ridge=1-Math.abs(r);
   const riverNoise=Math.abs(n.b.fbm2(x*.0024+140.2,z*.0024-260.8,3));
   const river=1-serverSmoothstep(.025,.105,riverNoise);
-  let h=30+3+cont*10+hills*4.5+mMask*(ridge*ridge*46);
-  if(h<30+24) h-=river*9;
+  let h=SEA_LEVEL+3+cont*10+hills*4.5+mMask*(ridge*ridge*46);
+  if(h<SEA_LEVEL+24) h-=river*9;
   h=Math.max(4,Math.min(WORLD_HEIGHT-4,Math.floor(h)));
-  const temp=n.c.fbm2(x*.0006+900.5,z*.0006+300.1,2)-(h-30)*.010;
+  const temp=n.c.fbm2(x*.0006+900.5,z*.0006+300.1,2)-(h-SEA_LEVEL)*.010;
   const humid=n.c.fbm2(x*.0007-400.2,z*.0007+700.9,2);
   let biome;
-  if(h<=31&&river>.35) biome='river';
-  else if(h>30+36) biome='mountains';
+  if(h<=SEA_LEVEL+1&&river>.35) biome='river';
+  else if(h>SEA_LEVEL+36) biome='mountains';
   else if(temp>.22&&humid<.06) biome='desert';
   else if(temp<-.30) biome='snowy';
   else if(humid>.17) biome='forest';
@@ -903,6 +999,20 @@ function serverMapColumn(x,z){
 }
 function serverH2(x,z,salt){
   let h=Math.imul(x,0x27d4eb2d)^Math.imul(z,0x165667b1)^Math.imul(salt,0x9e3779b1); h^=h>>>15; h=Math.imul(h,0x85ebca6b); h^=h>>>13; h=Math.imul(h,0xc2b2ae35); h^=h>>>16; return (h>>>0)/4294967296;
+}
+function serverH3(x,y,z,salt){
+  let h=Math.imul(x,0x27d4eb2d)^Math.imul(y,0x165667b1)^Math.imul(z,0x9e3779b1)^Math.imul(salt|0,0x85ebca6b);
+  h^=h>>>15; h=Math.imul(h,0x2c1b3c6d); h^=h>>>12; h=Math.imul(h,0x297a2d39); h^=h>>>15;
+  return (h>>>0)/4294967296;
+}
+function serverCaveAt(wx,y,wz){
+  if(y<3) return false;
+  const n=serverMapNoise();
+  const a=n.c.n3(wx*.019,y*.036,wz*.019);
+  const b=n.c.n3(wx*.019+51.7,y*.036+11.3,wz*.019-30.4);
+  if(a*a+b*b<.0022) return true;
+  if(y<26&&n.b.n3(wx*.030,y*.045,wz*.030)>.55) return true;
+  return false;
 }
 function serverCabinSpec(cx,cz,cache){
   const key=cx+','+cz; if(cache.has(key)) return cache.get(key);
@@ -915,12 +1025,123 @@ function serverCabinSpec(cx,cz,cache){
   }
   cache.set(key,spec); return spec;
 }
-function serverCabinRoof(x,z,terrain,cache){
-  const cx=Math.floor(x/16),cz=Math.floor(z/16),lx=x-cx*16,lz=z-cz*16,spec=serverCabinSpec(cx,cz,cache);
-  if(!spec||lx<3||lx>12||lz<3||lz>11) return null;
-  let top=spec.baseY+4; if(lz===7&&lx>3&&lx<12) top=spec.baseY+5;
-  return top>=terrain.h?{h:top,id:12,biome:terrain.biome,edited:true}:null;
+// Generated base voxels are resolved lazily from the same seed/hash/noise rules
+// used by client/index.html. Edits stay separate so a cache never hides an
+// authoritative player edit.
+const serverBaseChunkCache = new Map();
+let serverBaseChunkCacheSeed = null;
+function serverBaseChunkKey(cx,cz){ return `${cx},${cz}`; }
+function serverGenerateBaseChunk(cx,cz){
+  const data=new Uint8Array(16*16*WORLD_HEIGHT);
+  const set=(lx,y,lz,id)=>{ if(y>=0&&y<WORLD_HEIGHT) data[(y<<8)|(lz<<4)|lx]=id; };
+  const cols=[];
+  for(let lz=0;lz<16;lz++) for(let lx=0;lx<16;lx++){
+    const wx=cx*16+lx,wz=cz*16+lz,{h,biome}=serverMapColumn(wx,wz);
+    cols.push({h,biome});
+    let surf=1,sub=2,subDepth=3;
+    if(biome==='desert'){surf=5;sub=5;subDepth=4;}
+    else if(biome==='river'){surf=6;sub=5;subDepth=3;}
+    else if(biome==='snowy'){surf=17;}
+    else if(biome==='mountains'){surf=h>SEA_LEVEL+48?17:3;sub=3;}
+    if(h<=SEA_LEVEL+1){surf=(biome==='desert'||biome==='river')?5:(serverH3(wx,0,wz,7)<.35?6:5);sub=5;}
+    const top=Math.max(h,SEA_LEVEL);
+    for(let y=0;y<=top;y++){
+      let id;
+      if(y===0||(y<3&&serverH3(wx,y,wz,1)<.6-y*.25)) id=22;
+      else if(y<h-subDepth) id=3;
+      else if(y<h) id=sub;
+      else if(y===h) id=surf;
+      else id=y<=SEA_LEVEL?20:0;
+      if(id===3){
+        const o=serverH3(wx>>1,y>>1,wz>>1,2);
+        if(y<14&&o>.9970) id=26;
+        else if(y<26&&o>.9952) id=25;
+        else if(y<50&&o>.9905) id=24;
+        else if(o>.9835) id=23;
+        else if(y<22&&o<.004) id=21;
+      }
+      if(id!==0&&id!==20&&y<=h&&serverCaveAt(wx,y,wz)) id=(y<10&&serverH3(wx,y,wz,3)<.02)?28:0;
+      set(lx,y,lz,id);
+    }
+  }
+  const M=4;
+  for(let tz=-M;tz<16+M;tz++) for(let tx=-M;tx<16+M;tx++){
+    const wx=cx*16+tx,wz=cz*16+tz;
+    const col=(tx>=0&&tx<16&&tz>=0&&tz<16)?cols[tz*16+tx]:serverMapColumn(wx,wz),h=col.h,biome=col.biome,r=serverH3(wx,0,wz,11);
+    if(biome==='river'){
+      if(r<.018&&h>=SEA_LEVEL-1&&h<=SEA_LEVEL+1){
+        const ch=1+((serverH3(wx,1,wz,812)*2)|0);
+        for(let i=1;i<=ch;i++) if(tx>=0&&tx<16&&tz>=0&&tz<16) set(tx,h+i,tz,29);
+      }
+      continue;
+    }
+    if(h<=SEA_LEVEL+1) continue;
+    if(biome==='desert'){
+      if(r<.006){
+        const ch=2+((serverH3(wx,1,wz,12)*2)|0);
+        for(let i=1;i<=ch;i++) if(tx>=0&&tx<16&&tz>=0&&tz<16) set(tx,h+i,tz,29);
+      }
+      continue;
+    }
+    const spruce=biome==='snowy',dens=biome==='forest'?.055:biome==='snowy'?.030:biome==='plains'?.010:.004;
+    if(r>=dens||serverCaveAt(wx,h,wz)) continue;
+    const logId=spruce?9:7,leafId=spruce?10:8,th=(spruce?6:4)+((serverH3(wx,1,wz,13)*3)|0);
+    const put=(x,y,z,id,soft)=>{ if(x<0||x>=16||z<0||z>=16||y<0||y>=WORLD_HEIGHT)return; const i=(y<<8)|(z<<4)|x; if(soft&&data[i]!==0)return; data[i]=id; };
+    for(let i=1;i<=th;i++) put(tx,h+i,tz,logId,false);
+    if(spruce){
+      for(let ly=2;ly<=th+1;ly++){
+        const t=(ly-2)/(th-1),rad=Math.max(0,Math.round(2.6-t*2.4));
+        for(let dx=-rad;dx<=rad;dx++) for(let dz=-rad;dz<=rad;dz++){
+          if(Math.abs(dx)+Math.abs(dz)>rad+1)continue;
+          if(dx===0&&dz===0&&ly<=th)continue;
+          put(tx+dx,h+ly,tz+dz,leafId,true);
+        }
+      }
+      put(tx,h+th+2,tz,leafId,true);
+    } else {
+      for(let ly=th-2;ly<=th+1;ly++){
+        const rad=ly>=th?1:2;
+        for(let dx=-rad;dx<=rad;dx++) for(let dz=-rad;dz<=rad;dz++){
+          if(Math.abs(dx)===rad&&Math.abs(dz)===rad&&serverH3(wx+dx,ly,wz+dz,14)>.4)continue;
+          if(dx===0&&dz===0&&ly<=th)continue;
+          put(tx+dx,h+ly,tz+dz,leafId,true);
+        }
+      }
+    }
+  }
+  const cabinCache=new Map(),cabinChance=serverH2(cx,cz,901),showcaseCabin=cx===0&&cz===0;
+  if(cabinChance<.035||showcaseCabin){
+    const x0=3,z0=3,w=10,d=9,anchor=serverMapColumn(cx*16+7,cz*16+6);let minH=WORLD_HEIGHT,maxH=0;
+    for(let lz=z0;lz<z0+d;lz++) for(let lx=x0;lx<x0+w;lx++){const q=serverMapColumn(cx*16+lx,cz*16+lz);minH=Math.min(minH,q.h);maxH=Math.max(maxH,q.h);}
+    if(showcaseCabin||((anchor.biome==='plains'||anchor.biome==='forest')&&anchor.h>SEA_LEVEL+1&&anchor.h<WORLD_HEIGHT-9&&maxH-minH<=3)){
+      const baseY=anchor.h+1,putCabin=(x,y,z,id)=>{if(x>=0&&x<16&&z>=0&&z<16&&y>0&&y<WORLD_HEIGHT)data[(y<<8)|(z<<4)|x]=id;};
+      for(let z=z0;z<z0+d;z++)for(let x=x0;x<x0+w;x++)putCabin(x,baseY,z,11);
+      for(let y=1;y<=3;y++)for(let z=z0;z<z0+d;z++)for(let x=x0;x<x0+w;x++){
+        const edge=x===x0||x===x0+w-1||z===z0||z===z0+d-1;if(!edge)continue;let id=11;
+        if(z===z0&&x===x0+4&&y<=2)id=44;else if(y===2&&((x===x0||x===x0+w-1)&&z>z0+1&&z<z0+d-2))id=19;else if(y===2&&z===z0+d-1&&x>x0+1&&x<x0+w-2)id=19;
+        putCabin(x,baseY+y,z,id);
+      }
+      for(let z=z0-1;z<=z0+d;z++)for(let x=x0-1;x<=x0+w;x++){if(x<0||x>=16||z<0||z>=16)continue;if(x===x0-1||x===x0+w||z===z0-1||z===z0+d)putCabin(x,baseY,z,42);}
+      for(let z=z0-1;z<=z0+d;z++)for(let x=x0;x<x0+w;x++)if((x===x0||x===x0+w-1)&&z!==z0+1&&z!==z0+2)putCabin(x,baseY+1,z,43);
+      for(let z=z0;z<z0+d;z++)for(let x=x0;x<x0+w;x++)putCabin(x,baseY+4,z,12);
+      for(let x=x0+1;x<x0+w-1;x++)putCabin(x,baseY+5,z0+4,12);
+      putCabin(x0+1,baseY+3,z0,45);putCabin(x0+7,baseY+2,z0,48);putCabin(x0+2,baseY+1,z0+2,50);putCabin(x0+7,baseY+1,z0+2,49);putCabin(x0+5,baseY+1,z0+5,51);putCabin(x0+8,baseY+1,z0+6,47);
+    }
+  }
+  return data;
 }
+function serverBaseChunkData(cx,cz){
+  if(serverBaseChunkCacheSeed!==world.seed){serverBaseChunkCacheSeed=world.seed;serverBaseChunkCache.clear();}
+  const key=serverBaseChunkKey(cx,cz);let data=serverBaseChunkCache.get(key);
+  if(!data){data=serverGenerateBaseChunk(cx,cz);serverBaseChunkCache.set(key,data);if(serverBaseChunkCache.size>256)serverBaseChunkCache.delete(serverBaseChunkCache.keys().next().value);}
+  return data;
+}
+function serverBaseBlockAt(x,y,z){
+  if(y<0||y>=WORLD_HEIGHT)return 0;
+  const cx=Math.floor(x/16),cz=Math.floor(z/16),data=serverBaseChunkData(cx,cz);
+  return data[(y<<8)|((z-cz*16)<<4)|(x-cx*16)]||0;
+}
+
 const SERVER_MAP_COLORS={
   1:[104,166,64],2:[134,96,67],3:[128,129,132],4:[110,110,112],5:[221,208,160],6:[140,134,128],
   7:[168,132,86],8:[58,112,44],9:[168,132,86],10:[38,84,52],11:[170,134,80],12:[112,84,52],
@@ -930,7 +1151,7 @@ const SERVER_MAP_COLORS={
   42:[145,112,76],43:[122,82,47],44:[154,108,59],45:[250,193,76],46:[158,112,59],47:[125,79,42],48:[175,130,73],49:[109,67,38],50:[158,112,59],51:[170,134,80]
 };
 function serverMapRGB(column,id){
-  if(id===20||column.biome==='river') return [55,125,215];
+  if(id===20) return [55,125,215];
   if(id===21) return [225,83,22];
   if(id&&SERVER_MAP_COLORS[id]) return SERVER_MAP_COLORS[id];
   if(column.biome==='desert') return [221,208,160];
@@ -950,39 +1171,14 @@ function serverMapEditColumns(){
   }
   return columns;
 }
-function serverMapColumnWithEdits(x,z,terrain,cabin,editColumns){
-  const edits=editColumns.get(x+','+z);
-  if(!edits) return cabin||terrain;
-  const base=cabin||terrain;
-  let highestPlaced=null;
-  for(const [y,id] of edits){ if(id>0&&(!highestPlaced||y>highestPlaced.y)) highestPlaced={y,id}; }
-  if(highestPlaced&&highestPlaced.y>=base.h) return {h:highestPlaced.y,id:highestPlaced.id,biome:terrain.biome,edited:true};
-  // If the visible top was removed, expose the next natural layer. For a
-  // cabin roof this is intentionally conservative: its underlying terrain is
-  // still preferable to showing a stale roof in the authoritative raster.
-  if(edits.get(base.h)===0){
-    const lower=highestPlaced&&highestPlaced.y<base.h?highestPlaced:null;
-    if(lower) return {h:lower.y,id:lower.id,biome:terrain.biome,edited:true};
-    return base===cabin?terrain:{h:Math.max(0,terrain.h-1),id:terrain.id,biome:terrain.biome,edited:true};
+function serverMapVisibleColumn(x,z,editColumns){
+  const cx=Math.floor(x/16),cz=Math.floor(z/16),lx=x-cx*16,lz=z-cz*16,data=serverBaseChunkData(cx,cz),edits=editColumns.get(x+','+z),terrain=serverMapColumn(x,z);
+  for(let y=WORLD_HEIGHT-1;y>=0;y--){
+    const id=edits&&edits.has(y)?Number(edits.get(y)):data[(y<<8)|(lz<<4)|lx]||0;
+    if(id!==0)return {h:y,id,biome:terrain.biome,edited:!!(edits&&edits.has(y))};
   }
-  return base;
+  return {h:0,id:0,biome:terrain.biome,edited:!!edits};
 }
-const MASTER_MAP_MIN = -512;
-const MASTER_MAP_MAX = 512;
-const MASTER_MAP_SPAN = MASTER_MAP_MAX - MASTER_MAP_MIN; // 1024
-const MASTER_MAP_STEP = 2;
-const MASTER_MAP_GRID = Math.floor(MASTER_MAP_SPAN / MASTER_MAP_STEP) + 1; // 513
-const MAP_SYNC_INTERVAL_MS = Math.max(10000, Number(process.env.MAP_SYNC_INTERVAL_MS || 10 * 60 * 1000)); // 10 minutes
-
-let masterMapCache = {
-  worldId: null,
-  seed: null,
-  pixels: null,
-  columns: null,
-  markers: []
-};
-const dirtyMapLocations = new Set();
-
 function computeMapColumnPixel(c, west, east, north, south) {
   const relief = ((west.h - east.h) + (north.h - south.h)) * .018;
   const light = Math.max(.40, Math.min(1.24, .84 + (c.h - 30) * .009 + relief));
@@ -994,141 +1190,62 @@ function computeMapColumnPixel(c, west, east, north, south) {
   ];
 }
 
-function bakeMasterMapCache(force = false) {
-  if (!force && masterMapCache.pixels && masterMapCache.worldId === world.id && masterMapCache.seed === world.seed) return;
-  const t0 = Date.now();
-  const grid = MASTER_MAP_GRID, editColumns = serverMapEditColumns(), cabinCache = new Map();
-  const columns = new Array(grid * grid);
-
-  for (let gz = 0; gz < grid; gz++) {
-    const z = MASTER_MAP_MIN + gz * MASTER_MAP_STEP;
-    for (let gx = 0; gx < grid; gx++) {
-      const x = MASTER_MAP_MIN + gx * MASTER_MAP_STEP;
-      const terrain = serverMapColumn(x, z), cabin = serverCabinRoof(x, z, terrain, cabinCache);
-      columns[gz * grid + gx] = serverMapColumnWithEdits(x, z, terrain, cabin, editColumns);
+const MAP_TILE_SIZE = 64;
+const serverMapTileCache = new Map();
+function serverMapTileCacheKey(tx,tz,step){ return `${world.id}:${world.seed}:${world.revision}:${tx}:${tz}:${step}`; }
+function serverMapTile(tx,tz,step,sharedEditColumns=null){
+  const key=serverMapTileCacheKey(tx,tz,step),cached=serverMapTileCache.get(key);
+  if(cached){ serverMapTileCache.delete(key); serverMapTileCache.set(key,cached); return cached; }
+  const size=MAP_TILE_SIZE,worldSize=size*step,originX=tx*worldSize,originZ=tz*worldSize;
+  const editColumns=sharedEditColumns||serverMapEditColumns(),cabinCache=new Map(),padded=size+2,columns=new Array(padded*padded);
+  for(let gz=-1;gz<=size;gz++) for(let gx=-1;gx<=size;gx++){
+    const x=originX+gx*step,z=originZ+gz*step;
+    columns[(gz+1)*padded+(gx+1)]=serverMapVisibleColumn(x,z,editColumns);
+  }
+  const minCX=Math.floor(originX/16)-1,maxCX=Math.floor((originX+worldSize-1)/16)+1,minCZ=Math.floor(originZ/16)-1,maxCZ=Math.floor((originZ+worldSize-1)/16)+1;
+  for(let cz=minCZ;cz<=maxCZ;cz++)for(let cx=minCX;cx<=maxCX;cx++)serverCabinSpec(cx,cz,cabinCache);
+  const rgbPixels=Buffer.alloc(size*size*3);
+  for(let gz=0;gz<size;gz++) for(let gx=0;gx<size;gx++){
+    const i=(gz+1)*padded+(gx+1),c=columns[i],west=columns[i-1],east=columns[i+1],north=columns[i-padded],south=columns[i+padded],rgb=computeMapColumnPixel(c,west,east,north,south),p=(gz*size+gx)*3;
+    rgbPixels[p]=rgb[0]; rgbPixels[p+1]=rgb[1]; rgbPixels[p+2]=rgb[2];
+  }
+  // Keep vegetation and structure readable in the base raster. These are
+  // deliberately sparse pixel treatments; detailed labels remain overlays.
+  for(let gz=0;gz<size;gz++) for(let gx=0;gx<size;gx++){
+    const i=(gz+1)*padded+(gx+1),c=columns[i],x=originX+gx*step,z=originZ+gz*step,chance=serverH3(x,0,z,11);
+    const density=c.biome==='forest'?.055:c.biome==='snowy'?.030:c.biome==='plains'?.010:.004;
+    if(c.h>SEA_LEVEL+1&&c.id!==20&&c.id!==21&&chance<density){
+      const p=(gz*size+gx)*3,shade=c.biome==='snowy'?[68,104,116]:[42,112,56];
+      rgbPixels[p]=Math.round(rgbPixels[p]*.42+shade[0]*.58);rgbPixels[p+1]=Math.round(rgbPixels[p+1]*.42+shade[1]*.58);rgbPixels[p+2]=Math.round(rgbPixels[p+2]*.42+shade[2]*.58);
     }
-  }
-
-  const pixels = Buffer.alloc(grid * grid * 3);
-  for (let gz = 0; gz < grid; gz++) {
-    for (let gx = 0; gx < grid; gx++) {
-      const c = columns[gz * grid + gx];
-      const west = columns[gz * grid + Math.max(0, gx - 1)];
-      const east = columns[gz * grid + Math.min(grid - 1, gx + 1)];
-      const north = columns[Math.max(0, gz - 1) * grid + gx];
-      const south = columns[Math.min(grid - 1, gz + 1) * grid + gx];
-      const rgb = computeMapColumnPixel(c, west, east, north, south);
-      const p = (gz * grid + gx) * 3;
-      pixels[p] = rgb[0];
-      pixels[p + 1] = rgb[1];
-      pixels[p + 2] = rgb[2];
-    }
-  }
-
-  const markers = [];
-  for (const [key, spec] of cabinCache) {
-    if (!spec) continue;
-    const [cx, cz] = key.split(',').map(Number);
-    markers.push({ type: 'cabin', x: cx * 16 + 7.5, z: cz * 16 + 7.5 });
-  }
-
-  masterMapCache = {
-    worldId: world.id,
-    seed: world.seed,
-    pixels,
-    columns,
-    markers
-  };
-  dirtyMapLocations.clear();
-  log(`Baked master world map cache (1024×1024 span, ${grid}×${grid}) in ${Date.now() - t0}ms`);
-}
-
-function refreshMasterMapDeltas() {
-  if (!masterMapCache.pixels || !masterMapCache.columns || dirtyMapLocations.size === 0) return;
-  const grid = MASTER_MAP_GRID, editColumns = serverMapEditColumns(), cabinCache = new Map();
-  const updatedIndices = new Set();
-
-  for (const loc of dirtyMapLocations) {
-    const [x, z] = loc.split(',').map(Number);
-    if (x < MASTER_MAP_MIN || x > MASTER_MAP_MAX || z < MASTER_MAP_MIN || z > MASTER_MAP_MAX) continue;
-    const gx = Math.round((x - MASTER_MAP_MIN) / MASTER_MAP_STEP);
-    const gz = Math.round((z - MASTER_MAP_MIN) / MASTER_MAP_STEP);
-    if (gx >= 0 && gx < grid && gz >= 0 && gz < grid) {
-      const terrain = serverMapColumn(MASTER_MAP_MIN + gx * MASTER_MAP_STEP, MASTER_MAP_MIN + gz * MASTER_MAP_STEP);
-      const cabin = serverCabinRoof(MASTER_MAP_MIN + gx * MASTER_MAP_STEP, MASTER_MAP_MIN + gz * MASTER_MAP_STEP, terrain, cabinCache);
-      masterMapCache.columns[gz * grid + gx] = serverMapColumnWithEdits(MASTER_MAP_MIN + gx * MASTER_MAP_STEP, MASTER_MAP_MIN + gz * MASTER_MAP_STEP, terrain, cabin, editColumns);
-      for (let dz = -1; dz <= 1; dz++) {
-        for (let dx = -1; dx <= 1; dx++) {
-          const nx = gx + dx, nz = gz + dz;
-          if (nx >= 0 && nx < grid && nz >= 0 && nz < grid) updatedIndices.add(nz * grid + nx);
-        }
-      }
-    }
-  }
-
-  for (const idx of updatedIndices) {
-    const gx = idx % grid, gz = Math.floor(idx / grid);
-    const c = masterMapCache.columns[idx];
-    const west = masterMapCache.columns[gz * grid + Math.max(0, gx - 1)];
-    const east = masterMapCache.columns[gz * grid + Math.min(grid - 1, gx + 1)];
-    const north = masterMapCache.columns[Math.max(0, gz - 1) * grid + gx];
-    const south = masterMapCache.columns[Math.min(grid - 1, gz + 1) * grid + gx];
-    const rgb = computeMapColumnPixel(c, west, east, north, south);
-    const p = idx * 3;
-    masterMapCache.pixels[p] = rgb[0];
-    masterMapCache.pixels[p + 1] = rgb[1];
-    masterMapCache.pixels[p + 2] = rgb[2];
-  }
-
-  const count = dirtyMapLocations.size;
-  dirtyMapLocations.clear();
-  log(`10-minute map delta sync: updated ${count} dirty locations (${updatedIndices.size} pixels refreshed)`);
-}
-
-function serverMapRaster(url){
-  const centerX=integer(url.searchParams.get('x'),0), centerZ=integer(url.searchParams.get('z'),0);
-  const visibleRadius=clamp(integer(url.searchParams.get('radius'),96),48,420);
-  const requestedStep=Number(url.searchParams.get('step'));
-  const step=requestedStep===4?4:(requestedStep===2?2:1);
-  const radius=Math.max(visibleRadius+24,96), baseX=centerX-radius, baseZ=centerZ-radius;
-  const grid=Math.ceil((radius*2+1)/step);
-
-  // Fast-path: Sub-sample directly from pre-baked Master Map Cache (0ms CPU noise!)
-  if(masterMapCache.pixels && masterMapCache.worldId===world.id && masterMapCache.seed===world.seed &&
-     baseX>=MASTER_MAP_MIN && baseX+(grid-1)*step<=MASTER_MAP_MAX &&
-     baseZ>=MASTER_MAP_MIN && baseZ+(grid-1)*step<=MASTER_MAP_MAX){
-    const subPixels=Buffer.alloc(grid*grid*3);
-    const mGrid=MASTER_MAP_GRID;
-    for(let gz=0;gz<grid;gz++){
-      const z=baseZ+gz*step;
-      const mgz=Math.max(0,Math.min(mGrid-1,Math.round((z-MASTER_MAP_MIN)/MASTER_MAP_STEP)));
-      for(let gx=0;gx<grid;gx++){
-        const x=baseX+gx*step;
-        const mgx=Math.max(0,Math.min(mGrid-1,Math.round((x-MASTER_MAP_MIN)/MASTER_MAP_STEP)));
-        const srcP=(mgz*mGrid+mgx)*3;
-        const dstP=(gz*grid+gx)*3;
-        subPixels[dstP]=masterMapCache.pixels[srcP];
-        subPixels[dstP+1]=masterMapCache.pixels[srcP+1];
-        subPixels[dstP+2]=masterMapCache.pixels[srcP+2];
-      }
-    }
-    return {type:'mapRaster',worldId:world.id,seed:world.seed,baseX,baseZ,radius,step,grid,colors:subPixels.toString('base64'),markers:masterMapCache.markers};
-  }
-
-  const editColumns=serverMapEditColumns(), cabinCache=new Map(), columns=new Array(grid*grid);
-  for(let gz=0;gz<grid;gz++) for(let gx=0;gx<grid;gx++){
-    const x=baseX+gx*step,z=baseZ+gz*step, terrain=serverMapColumn(x,z), cabin=serverCabinRoof(x,z,terrain,cabinCache);
-    columns[gz*grid+gx]=serverMapColumnWithEdits(x,z,terrain,cabin,editColumns);
-  }
-  const pixels=Buffer.alloc(grid*grid*3);
-  for(let gz=0;gz<grid;gz++) for(let gx=0;gx<grid;gx++){
-    const c=columns[gz*grid+gx], west=columns[gz*grid+Math.max(0,gx-1)], east=columns[gz*grid+Math.min(grid-1,gx+1)], north=columns[Math.max(0,gz-1)*grid+gx], south=columns[Math.min(grid-1,gz+1)*grid+gx];
-    const rgb=computeMapColumnPixel(c,west,east,north,south), p=(gz*grid+gx)*3;
-    pixels[p]=rgb[0]; pixels[p+1]=rgb[1]; pixels[p+2]=rgb[2];
   }
   const markers=[];
-  for(const [key,spec] of cabinCache){ if(!spec) continue; const [cx,cz]=key.split(',').map(Number); markers.push({type:'cabin',x:cx*16+7.5,z:cz*16+7.5}); }
-  return {type:'mapRaster',worldId:world.id,seed:world.seed,baseX,baseZ,radius,step,grid,colors:pixels.toString('base64'),markers};
+  for(const [cKey,spec] of cabinCache){
+    if(!spec) continue;
+    const [cx,cz]=cKey.split(',').map(Number),x=cx*16+7.5,z=cz*16+7.5;
+    if(x>=originX&&x<originX+worldSize&&z>=originZ&&z<originZ+worldSize){
+      markers.push({type:'cabin',x,z});
+      const px=Math.round((x-originX)/step),pz=Math.round((z-originZ)/step),roofW=Math.max(1,Math.round(8/step)),roofD=Math.max(1,Math.round(7/step));
+      for(let dz=-Math.floor(roofD/2);dz<=Math.floor(roofD/2);dz++) for(let dx=-Math.floor(roofW/2);dx<=Math.floor(roofW/2);dx++){
+        const gx=px+dx,gz=pz+dz;if(gx<0||gz<0||gx>=size||gz>=size)continue;const p=(gz*size+gx)*3;rgbPixels[p]=126;rgbPixels[p+1]=82;rgbPixels[p+2]=48;
+      }
+    }
+  }
+  const indices=Buffer.alloc(size*size);
+  for(let i=0;i<indices.length;i++) indices[i]=((rgbPixels[i*3]>=192?3:rgbPixels[i*3]>=128?2:rgbPixels[i*3]>=64?1:0)<<4)|((rgbPixels[i*3+1]>=192?3:rgbPixels[i*3+1]>=128?2:rgbPixels[i*3+1]>=64?1:0)<<2)|(rgbPixels[i*3+2]>=192?3:rgbPixels[i*3+2]>=128?2:rgbPixels[i*3+2]>=64?1:0);
+  const tile={type:'mapTile',worldId:world.id,seed:world.seed,revision:world.revision,tx,tz,step,size,indices:indices.toString('base64'),markers};
+  serverMapTileCache.set(key,tile); if(serverMapTileCache.size>512) serverMapTileCache.delete(serverMapTileCache.keys().next().value);
+  return tile;
+}
+function serverMapTiles(url){
+  const centerX=integer(url.searchParams.get('x'),0),centerZ=integer(url.searchParams.get('z'),0),radius=clamp(integer(url.searchParams.get('radius'),96),48,420),requestedStep=Number(url.searchParams.get('step')),step=requestedStep===4?4:(requestedStep===2?2:1),size=MAP_TILE_SIZE,worldSize=size*step;
+  const minTX=Math.floor((centerX-radius)/worldSize),maxTX=Math.floor((centerX+radius)/worldSize),minTZ=Math.floor((centerZ-radius)/worldSize),maxTZ=Math.floor((centerZ+radius)/worldSize);
+  const tiles=[],editColumns=serverMapEditColumns();
+  for(let tz=minTZ;tz<=maxTZ;tz++) for(let tx=minTX;tx<=maxTX;tx++){
+    if(tiles.length>=49) break;
+    tiles.push(serverMapTile(tx,tz,step,editColumns));
+  }
+  return {type:'mapTiles',worldId:world.id,seed:world.seed,revision:world.revision,step,size,centerX,centerZ,radius,tiles};
 }
 let serverEditTopRevision=-1, serverEditTopSeed=null, serverEditTopsCache=new Map(), serverEditIdsCache=new Map(), serverTopCache=new Map();
 function rebuildServerEditCaches(){
@@ -1146,41 +1263,29 @@ function serverTopAt(x,z){
   rebuildServerEditCaches();
   const bx=Math.floor(x), bz=Math.floor(z), column=bx+','+bz;
   const cached=serverTopCache.get(column); if(cached!==undefined) return cached;
-  const terrain=serverMapColumn(bx,bz).h;
   let top=-1;
   for(let y=WORLD_HEIGHT-1;y>=0;y--){
     const key=`${bx},${y},${bz}`, edit=world.edits?.[key];
     if(edit!==undefined){
       const id=Number(edit);
-      if(id>0 && !(id===44&&world.doors[key]===true)){ top=y; break; }
+      if(id>0&&id!==20&&id!==21&&!(id===44&&world.doors[key]===true)){ top=y; break; }
       continue;
     }
-    if(y<=terrain){ top=y; break; }
+    const id=serverBaseBlockAt(bx,y,bz);
+    if(id>0&&id!==20&&id!==21&&!(id===44&&world.doors[key]===true)){ top=y; break; }
   }
   serverTopCache.set(column,top); return top;
 }
-let serverCabinCacheSeed=null, serverCabinPathCache=new Map();
-function serverStaticCabinSolidAt(x,y,z){
-  const cx=Math.floor(x/16), cz=Math.floor(z/16), lx=x-cx*16, lz=z-cz*16;
-  if(serverCabinCacheSeed!==world.seed){ serverCabinCacheSeed=world.seed; serverCabinPathCache=new Map(); }
-  const spec=serverCabinSpec(cx,cz,serverCabinPathCache); if(!spec) return false;
-  const x0=3,z0=3,w=10,d=9,baseY=spec.baseY, inFootprint=lx>=x0&&lx<x0+w&&lz>=z0&&lz<z0+d;
-  if(y===baseY && inFootprint) return true;
-  if(y>=baseY+1&&y<=baseY+3&&inFootprint&&(lx===x0||lx===x0+w-1||lz===z0||lz===z0+d-1)){
-    const key=`${x},${y},${z}`;
-    return !(lz===z0&&lx===x0+4&&y<=baseY+2&&world.doors[key]===true);
-  }
-  if(y===baseY+1&&((lx===x0||lx===x0+w-1)&&lz>=z0-1&&lz<=z0+d)) return true;
-  if(y===baseY+4&&inFootprint) return true;
-  if(y===baseY+5&&lz===z0+4&&lx>x0&&lx<x0+w-1) return true;
-  return false;
+function serverBlockIdAt(x,y,z){
+  x=Math.floor(x); y=Math.floor(y); z=Math.floor(z); if(y<0||y>=WORLD_HEIGHT) return 0;
+  const key=`${x},${y},${z}`,edit=world.edits?.[key];
+  return edit===undefined?serverBaseBlockAt(x,y,z):Number(edit)||0;
 }
 function serverSolidAt(x,y,z){
   x=Math.floor(x); y=Math.floor(y); z=Math.floor(z); if(y<0||y>=WORLD_HEIGHT) return false;
-  const key=`${x},${y},${z}`, edit=world.edits?.[key];
-  if(edit!==undefined){ const id=Number(edit); if(id===0) return false; if(Number(id)===44&&world.doors[key]===true) return false; return true; }
-  if(serverStaticCabinSolidAt(x,y,z)) return true;
-  return y<=serverMapColumn(x,z).h;
+  const key=`${x},${y},${z}`,id=serverBlockIdAt(x,y,z);
+  if(id===0||id===20||id===21) return false;
+  return !(id===44&&world.doors[key]===true);
 }
 function serverWalkHeight(x,z){
   const top=serverTopAt(x,z), foot=top+1;
@@ -1258,9 +1363,15 @@ function spawnPointBlockedByClaim(point) {
   return world.claims.some(claim=>claimContainsPoint(claim,point.x,point.z,1));
 }
 
+function serverPublicLandmarkObjectAt(object,x,y,z){
+  const cx=Math.floor(x/16),cz=Math.floor(z/16),anchor=serverMapColumn(cx*16+7,cz*16+6),chance=serverH2(cx,cz,901),showcase=cx===0&&cz===0;
+  const available=showcase||(chance<.035&&(anchor.biome==='plains'||anchor.biome==='forest')&&anchor.h>SEA_LEVEL+1&&anchor.h<WORLD_HEIGHT-9);
+  if(!available) return false;
+  const points={lamp:[3,2],crate:[12,5],barrel:[12,7],bench:[6,12],sign:[5,2]},point=points[object];
+  return !!point&&Math.floor(x)===cx*16+point[0]&&Math.floor(z)===cz*16+point[1]&&Math.floor(y)===anchor.h+1;
+}
 function isPublicLandmarkPoint(x,z) {
-  const cx=Math.floor(x/16),cz=Math.floor(z/16),lx=x-cx*16,lz=z-cz*16,spec=serverCabinSpec(cx,cz,new Map());
-  return !!spec&&lx>=2&&lx<=13&&lz>=2&&lz<=12;
+  return ['lamp','crate','barrel','bench','sign'].some(object=>serverPublicLandmarkObjectAt(object,x,serverMapColumn(Math.floor(x),Math.floor(z)).h+1,z));
 }
 
 function claimIntersectsSpawnArea(claim) {
@@ -1422,9 +1533,9 @@ function analyzerBlockName(id){ return ANALYZER_BLOCK_NAMES[id]||`Block ${id}`; 
 function analyzerBlockValue(id){ return Number(ANALYZER_BLOCK_VALUES[id]||1); }
 function analyzerSolidAt(editMap,x,y,z){
   if(y<0||y>=WORLD_HEIGHT) return false;
-  const key=`${x},${y},${z}`;
-  if(editMap.has(key)) return Number(editMap.get(key))>0;
-  return y<=serverMapColumn(x,z).h;
+  const key=`${x},${y},${z}`,id=editMap.has(key)?Number(editMap.get(key)):serverBaseBlockAt(x,y,z);
+  if(id===0||id===20||id===21) return false;
+  return !(id===44&&world.doors[key]===true);
 }
 function analyzerAirRoomCount(editMap,bounds,floorY){
   const y=floorY+1; if(y>=WORLD_HEIGHT) return 0;
@@ -2117,6 +2228,7 @@ function worldState(forClient=null) {
       landAuctions: landAuctionsPayload(forClient?.playerId||null),
       landRegistry: {parcelSize:PARCEL_SIZE,basePrice:BASE_LAND_PRICE,currency:'Coin'},
       revision: world.revision,
+      physics: PHYSICS_CONFIG,
       edits: world.edits,
       doors: world.doors,
       lights: world.lights
@@ -2140,34 +2252,78 @@ function validBlockEdit(client, x, y, z) {
 }
 
 function serverPlayerCollides(px,py,pz){
-  const half=.3,height=1.8,x0=Math.floor(px-half),x1=Math.floor(px+half),y0=Math.floor(py),y1=Math.floor(py+height-.001),z0=Math.floor(pz-half),z1=Math.floor(pz+half);
+  const half=PHYSICS_CONFIG.player.halfWidth,height=PHYSICS_CONFIG.player.height;
+  const x0=Math.floor(px-half),x1=Math.floor(px+half),y0=Math.floor(py),y1=Math.floor(py+height-.001),z0=Math.floor(pz-half),z1=Math.floor(pz+half);
   for(let y=y0;y<=y1;y++) for(let z=z0;z<=z1;z++) for(let x=x0;x<=x1;x++) if(serverSolidAt(x,y,z)) return true;
   return false;
 }
-function serverPlayerMotionValid(client,nx,ny,nz,now){
-  if(![nx,ny,nz].every(Number.isFinite)||ny<-20||ny>1000) return false;
-  const elapsed=Math.max(.05,Math.min(.8,(now-(client.lastStateAt||now))/1000));
-  const isCreative=client.mode==='creative';
-  const maxSpeed=isCreative?36:18;
-  const maxDistance=maxSpeed*elapsed+3.5;
-  const dx=nx-client.x,dy=ny-client.y,dz=nz-client.z;
-  const dist=Math.hypot(dx,dy,dz);
-  if(dist>maxDistance) return false;
-
-  // Fast open-sky check: if player is flying above terrain level, skip voxel collision loop entirely
-  const startTop=serverTopAt(client.x,client.z), endTop=serverTopAt(nx,nz);
-  const highestGround=Math.max(startTop,endTop);
-  if(client.y>highestGround+2.2 && ny>highestGround+2.2){
-    return true; // Clear open airspace - 0 voxel collision steps needed!
-  }
-
-  const steps=Math.max(1,Math.ceil(Math.max(Math.abs(dx),Math.abs(dy),Math.abs(dz))/.6));
+function serverMotionPathClear(ax,ay,az,bx,by,bz){
+  const steps=Math.max(1,Math.ceil(Math.max(Math.abs(bx-ax),Math.abs(by-ay),Math.abs(bz-az))/.12));
   for(let step=1;step<=steps;step++){
     const t=step/steps;
-    const sy=client.y+dy*t;
-    if(sy<=highestGround+2.0 && serverPlayerCollides(client.x+dx*t,sy,client.z+dz*t)) return false;
+    if(serverPlayerCollides(ax+(bx-ax)*t,ay+(by-ay)*t,az+(bz-az)*t)) return false;
   }
   return true;
+}
+function serverPlayerInWater(px,py,pz){
+  const x=Math.floor(px),z=Math.floor(pz),feet=serverBlockIdAt(x,Math.floor(py+.2),z),eye=serverBlockIdAt(x,Math.floor(py+1.62),z);
+  return feet===20||eye===20;
+}
+function serverPlayerGrounded(px,py,pz){
+  if(serverPlayerCollides(px,py,pz)) return false;
+  return serverPlayerCollides(px,py-.08,pz);
+}
+function serverAutoStepPathClear(client,nx,ny,nz){
+  const stepHeight=PHYSICS_CONFIG.player.stepHeight,raisedY=client.y+stepHeight;
+  if(serverPlayerCollides(client.x,raisedY,client.z)) return false;
+  if(!serverMotionPathClear(client.x,raisedY,client.z,nx,raisedY,nz)) return false;
+  // The final descent is deliberately bounded by STEP_HEIGHT. This accepts a
+  // one-block stair/step but not a client-side teleport down a cliff.
+  if(ny<client.y||ny>raisedY+.001){
+    if(Math.abs(ny-client.y)>stepHeight+.08) return false;
+  }
+  return serverMotionPathClear(nx,raisedY,nz,nx,ny,nz);
+}
+function serverPlayerMotionValid(client,nx,ny,nz,now,motion={}){
+  if(![nx,ny,nz].every(Number.isFinite)||ny<-20||ny>MAX_FLIGHT_HEIGHT) return false;
+  const elapsed=Math.max(.05,Math.min(.8,(now-(client.lastStateAt||now))/1000));
+  const isCreative=client.mode==='creative',isFlying=isCreative&&motion.fly===true;
+  if(motion.fly===true&&!isCreative) return false;
+  const startInWater=serverPlayerInWater(client.x,client.y,client.z),inWater=serverPlayerInWater(nx,ny,nz);
+  const wasGrounded=serverPlayerGrounded(client.x,client.y,client.z),requestedAutoStep=motion.autoStep===true;
+  // A step is committed locally in one frame. Allow a tiny server/client
+  // grounding discrepancy while that explicit step marker is active, but
+  // still derive support from the authoritative voxel map rather than
+  // trusting the client's onGround bit.
+  const stepGrounded=wasGrounded || (requestedAutoStep && serverPlayerGrounded(client.x,client.y+0.08,client.z));
+  const jumpEdge=motion.jump===true&&client.jump!==true;
+  const movement=PHYSICS_CONFIG.movement;
+  const maxSpeed=isFlying?movement.flightSpeed:(inWater?movement.waterSpeed:(motion.sprint===true?movement.sprintSpeed:movement.walkSpeed));
+  const dx=nx-client.x,dy=ny-client.y,dz=nz-client.z;
+
+  // Validate horizontal and vertical motion independently. The old single
+  // Euclidean distance limit treated the horizontal walk speed as the limit
+  // for Y as well, so a legitimate fast fall (up to -55) or flight with
+  // forward + ascent could be rejected and snapped back by the client.
+  // These are still strict envelopes; the final swept voxel path below is
+  // always required before a state is accepted.
+  const horizontalAllowance=maxSpeed*elapsed+0.75;
+  if(Math.hypot(dx,dz)>horizontalAllowance) return false;
+  const upwardSpeed=isFlying?movement.flightSpeed*.8:(startInWater||inWater?3.6:9.4);
+  const downwardSpeed=isFlying?movement.flightSpeed*.8:(startInWater||inWater?3.5:55);
+  const verticalAllowance=(dy>=0?upwardSpeed:downwardSpeed)*elapsed+0.75;
+  if(Math.abs(dy)>verticalAllowance) return false;
+
+  // A jump impulse may only begin while grounded (or while swimming). The
+  // reported jump/onGround bits are state hints; the server derives the
+  // actual support voxel before accepting the impulse. Once airborne, the
+  // vertical envelope above permits the rest of the same jump arc.
+  if(jumpEdge&&!isFlying&&!startInWater&&!stepGrounded) return false;
+
+  const directPathClear=serverMotionPathClear(client.x,client.y,client.z,nx,ny,nz);
+  if(directPathClear) return true;
+  if(!isFlying&&stepGrounded&&!startInWater&&PHYSICS_CONFIG.movement.autoStep&&serverAutoStepPathClear(client,nx,ny,nz)) return true;
+  return false;
 }
 
 function rejectPermission(ws,x,y,z,access) {
@@ -2175,14 +2331,20 @@ function rejectPermission(ws,x,y,z,access) {
 }
 
 function commitEdit(client, x, y, z, id, oldId = null) {
-  const key = editKey(x, y, z);
-  if (oldId !== null && world.edits[key] !== undefined && Number(world.edits[key]) !== Number(oldId)) {
-    send(client.ws, { type: 'editRejected', reason: 'block_changed', x, y, z });
+  const key = editKey(x, y, z),currentId=serverBlockIdAt(x,y,z);
+  if(oldId!==null&&currentId!==Number(oldId)){
+    send(client.ws,{type:'editRejected',reason:'block_changed',x,y,z});
+    return false;
+  }
+  if(id===0){
+    if(currentId===0){ send(client.ws,{type:'editRejected',reason:'block_not_found',x,y,z}); return false; }
+    if(currentId===22){ send(client.ws,{type:'editRejected',reason:'unbreakable_block',x,y,z}); return false; }
+  }else if(currentId!==0&&currentId!==20&&currentId!==21){
+    send(client.ws,{type:'editRejected',reason:'block_occupied',x,y,z});
     return false;
   }
   world.edits[key] = id;
   world.revision += 1;
-  dirtyMapLocations.add(`${x},${z}`);
   broadcast({ type: 'blockUpdate', x, y, z, id, revision: world.revision, by: client.id });
   const editedClaim=world.claims.find(claim=>claimContainsPoint(claim,x+.5,z+.5));
   if(editedClaim){
@@ -2207,10 +2369,9 @@ function parseBody(req) {
 }
 
 function authorized(req) {
-  const headerToken = req.headers['x-admin-token'];
-  const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
-  const queryToken = url.searchParams.get('token');
-  return headerToken === ADMIN_TOKEN || queryToken === ADMIN_TOKEN;
+  // Never accept the admin credential in a URL: URLs can be stored in proxy
+  // logs, browser history and Referer headers. The panel sends this header.
+  return req.headers['x-admin-token'] === ADMIN_TOKEN;
 }
 
 function json(res, status, data, headers = {}) {
@@ -2218,7 +2379,6 @@ function json(res, status, data, headers = {}) {
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
     'Cache-Control': 'no-store',
-    'Access-Control-Allow-Origin': '*',
     ...headers
   });
   res.end(text);
@@ -2245,9 +2405,9 @@ function switchActiveWorld(id){
   if(!next) return false;
   if(world.id!==next.id) saveWorld();
   activeWorldId=next.id; world=next; ensureDefaultLandAuctions(); entities.clear();
-  bakeMasterMapCache(true);
   for(const client of clients.values()){
     client.mode=world.mode;
+    client.fly=false;
     if(client.joined){ client.spawn=allocateSpawnSlot(client.identityKey,client.playerId); client.x=client.spawn.x; client.y=client.spawn.y; client.z=client.spawn.z; }
     send(client.ws,{type:'serverWorldChanged',worldId:world.id});
     send(client.ws,worldState(client));
@@ -2268,8 +2428,8 @@ function createRandomWorld(payload={}){
 
 async function handleApi(req, res, url) {
   if (url.pathname === '/healthz') return json(res, 200, { ok: true });
-  if (url.pathname === '/api/map' && req.method === 'GET') {
-    return json(res, 200, serverMapRaster(url));
+  if ((url.pathname === '/api/map/tiles' || url.pathname === '/api/map') && req.method === 'GET') {
+    return json(res, 200, serverMapTiles(url));
   }
   if (url.pathname === '/api/land/quote' && req.method === 'GET') {
     const x=Number(url.searchParams.get('x')),z=Number(url.searchParams.get('z'));
@@ -2319,7 +2479,10 @@ async function handleApi(req, res, url) {
   }
   if (url.pathname.startsWith('/api/phase10b/') && req.method === 'POST') {
     try {
-      const body=await parseBody(req), authenticated=authenticateApiPlayer(body);
+      const body=await parseBody(req);
+      const authKey=`http:${req.socket.remoteAddress||'unknown'}`;
+      if(!allowAuthAttempt(authKey)) return json(res,429,{ok:false,reason:'rate_limited',message:'Too many authentication attempts; try again later'});
+      const authenticated=authenticateApiPlayer(body);
       if(!authenticated) return json(res,401,{ok:false,reason:'authentication_required',message:'Username and Password are required; playerId alone is not accepted'});
       const actor={...authenticated,x:Number.isFinite(Number(body.x))?Number(body.x):world.spawn.x,z:Number.isFinite(Number(body.z))?Number(body.z):world.spawn.z,y:Number.isFinite(Number(body.y))?Number(body.y):50};
       let result;
@@ -2356,6 +2519,7 @@ async function handleApi(req, res, url) {
       uptime: process.uptime(),
       players: clients.size,
       maxPlayers: MAX_PLAYERS,
+      physics: PHYSICS_CONFIG,
       activeWorldId,
       worlds: listWorlds(),
       world: {
@@ -2439,7 +2603,8 @@ async function handleApi(req, res, url) {
       world.mode = body.mode;
       for (const client of clients.values()) {
         client.mode = world.mode;
-        send(client.ws, { type: 'serverMode', mode: world.mode });
+        if(world.mode!=='creative') client.fly=false;
+        send(client.ws, { type: 'serverMode', mode: world.mode, physics:PHYSICS_CONFIG });
       }
       sendPlayers();
       return json(res, 200, { ok: true, mode: world.mode });
@@ -2507,6 +2672,11 @@ wss.on('connection', (ws, req) => {
     yaw: 0,
     pitch: 0,
     mode: world.mode,
+    fly: false,
+    sprint: false,
+    inWater: false,
+    onGround: false,
+    jump: false,
     selectedBlock: 1,
     health:100,
     connectedAt: new Date().toISOString(),
@@ -2522,7 +2692,8 @@ wss.on('connection', (ws, req) => {
     version: 1,
     playerId: null,
     sessionId: id,
-    maxPlayers: MAX_PLAYERS
+    maxPlayers: MAX_PLAYERS,
+    physics: PHYSICS_CONFIG
   });
 
   ws.on('message', raw => {
@@ -2535,6 +2706,8 @@ wss.on('connection', (ws, req) => {
       // First login requires Username + Password. A later visit may use the
       // signed remembered-session token issued after that successful login;
       // the password is never stored in the browser.
+      const authKey=`ws:${req.socket.remoteAddress||'unknown'}`;
+      if(!allowAuthAttempt(authKey)) return send(ws,{type:'authRejected',reason:'rate_limited',message:'Too many authentication attempts; try again later'});
       let auth=message.sessionToken?authenticateRememberedSession(message.username,message.sessionToken):{ok:false};
       if(!auth.ok) auth=authenticateAccount(message.username,message.password,message.name);
       if(!auth.ok) return send(ws,{type:'authRejected',reason:auth.reason,message:auth.message});
@@ -2549,9 +2722,10 @@ wss.on('connection', (ws, req) => {
       client.identityKey=resolved.identityKey;
       client.spawn=allocateSpawnSlot(client.identityKey,client.playerId);
       client.x=client.spawn.x; client.y=client.spawn.y; client.z=client.spawn.z;
+      client.fly=false; client.sprint=false; client.inWater=false; client.onGround=false; client.jump=false; client.lastStateAt=Date.now();
       client.joined = true;
       client.mode = world.mode;
-      send(ws, { type: 'joined', playerId: client.playerId, username:client.username, name: client.name, accountCreated:auth.created, sessionToken:issueRememberedSession(auth.account), freeClaimAvailable:resolved.profile.hasClaimedFree!==true, health:client.health, maxHealth:100, spawn:client.spawn, spawnArea:spawnAreaSummary(), claim:claimDetails(playerClaim(client.playerId),client.playerId), claims:claimsSummary() });
+      send(ws, { type: 'joined', playerId: client.playerId, username:client.username, name: client.name, accountCreated:auth.created, sessionToken:issueRememberedSession(auth.account), freeClaimAvailable:resolved.profile.hasClaimedFree!==true, health:client.health, maxHealth:100, spawn:client.spawn, spawnArea:spawnAreaSummary(), physics:PHYSICS_CONFIG, claim:claimDetails(playerClaim(client.playerId),client.playerId), claims:claimsSummary() });
       send(ws,{type:'storeCatalog',currency:'Coin',prefabs:prefabCatalogPayload(),allPaid:true});
       send(ws,propertyReportMessage(playerClaim(client.playerId)));
       send(ws,{type:'walletUpdate',wallet:walletSnapshot(client.playerId)});
@@ -2832,11 +3006,24 @@ function purchaseNpcClaim(client,result){
       // Creative flight can go well above the terrain ceiling; this is only a
       // safety limit, not a teleport-back-to-spawn boundary. The server still
       // validates the submitted motion against the same voxel collision map.
-      const nextY=clamp(number(message.y, client.y), -100, 1000),nextZ=clamp(number(message.z, client.z), -100000, 100000);
-      if(!serverPlayerMotionValid(client,nextX,nextY,nextZ,now)) return send(ws,{type:'playerStateRejected',reason:'collision_or_teleport',x:client.x,y:client.y,z:client.z});
+      const nextY=clamp(number(message.y, client.y), -100, MAX_FLIGHT_HEIGHT),nextZ=clamp(number(message.z, client.z), -100000, 100000);
+      const motion={
+        onGround:message.onGround===true,
+        inWater:message.inWater===true,
+        sprint:message.sprint===true,
+        fly:message.fly===true,
+        jump:message.jump===true,
+        autoStep:message.autoStep===true
+      };
+      if(!serverPlayerMotionValid(client,nextX,nextY,nextZ,now,motion)) return send(ws,{type:'playerStateRejected',reason:'collision_or_teleport',x:client.x,y:client.y,z:client.z});
       client.x=nextX; client.y=nextY; client.z=nextZ; client.lastStateAt=now;
       client.yaw = number(message.yaw, client.yaw);
       client.pitch = clamp(number(message.pitch, client.pitch), -1.57, 1.57);
+      client.fly=motion.fly&&client.mode==='creative';
+      client.sprint=motion.sprint&&!client.fly;
+      client.inWater=serverPlayerInWater(nextX,nextY,nextZ);
+      client.onGround=serverPlayerGrounded(nextX,nextY,nextZ);
+      client.jump=motion.jump;
       client.selectedBlock = clamp(integer(message.selectedBlock, 1), 0, 255);
       return;
     }
@@ -2866,10 +3053,11 @@ function purchaseNpcClaim(client,result){
       if(!validBlockEdit(client,x,y,z)) return send(ws,{type:'objectInteractRejected',reason:'too_far_or_invalid',x,y,z,message:'Object is too far away or invalid'});
       const access=claimAccess(client,x,z,'use'); if(!access.ok) return rejectPermission(ws,x,y,z,access);
       const object=String(message.object||'').replace(/[^a-z0-9_-]/gi,'').slice(0,24);
-      const expectedIds={chest:50,crate:46,barrel:47,sign:48},key=editKey(x,y,z),stored=world.edits?.[key],isPublicLandmark=['bench','lamp','sign'].includes(object)&&isPublicLandmarkPoint(x,z);
-      // Storage and placed signs must be real server-side blocks. Only the
-      // generated public landmark props are allowed without an edit record.
-      if(!object||(expectedIds[object]!==undefined&&Number(stored)!==expectedIds[object]&&!isPublicLandmark)||(!expectedIds[object]&& !isPublicLandmark)) return send(ws,{type:'objectInteractRejected',reason:'object_not_found',x,y,z,message:'That interactive object is not present here'});
+      const expectedIds={chest:50,crate:46,barrel:47,sign:48},key=editKey(x,y,z),currentId=serverBlockIdAt(x,y,z),isPublicLandmark=serverPublicLandmarkObjectAt(object,x,y,z);
+      // Validate the effective voxel, including deterministic generated
+      // cabins. A client cannot turn a removed/private object into an
+      // interactable one by sending an object name alone.
+      if(!object||(expectedIds[object]!==undefined&&currentId!==expectedIds[object]&&!isPublicLandmark)||(!expectedIds[object]&&!isPublicLandmark)) return send(ws,{type:'objectInteractRejected',reason:'object_not_found',x,y,z,message:'That interactive object is not present here'});
       send(ws,{type:'objectInteractAccepted',object,x,y,z});
       broadcast({type:'objectState',object,x,y,z,by:client.id},client.id);
       return;
@@ -2883,7 +3071,7 @@ function purchaseNpcClaim(client,result){
         commitEdit(client, x, y, z, 0, message.oldId === undefined ? null : integer(message.oldId, -1));
       } else {
         const idValue = integer(message.id, 0);
-        if (idValue <= 0 || idValue > MAX_BLOCK_ID) return send(ws, { type: 'editRejected', reason: 'invalid_block', x, y, z });
+        if (idValue <= 0 || idValue > MAX_BLOCK_ID || idValue === 22) return send(ws, { type: 'editRejected', reason: 'invalid_block', x, y, z });
         commitEdit(client, x, y, z, idValue, message.oldId === undefined ? null : integer(message.oldId, -1));
       }
       return;
@@ -2922,7 +3110,6 @@ setInterval(() => runBusinessCycle(), BUSINESS_TICK_MS);
 setInterval(() => runRentalCycle(), RENT_TICK_MS);
 setInterval(() => runLandAuctionCycle(), Math.max(1000, Math.min(RENT_TICK_MS, 10000)));
 setInterval(() => constructionRunCycle(), NPC_CONSTRUCTION_TICK_MS);
-setInterval(() => refreshMasterMapDeltas(), MAP_SYNC_INTERVAL_MS);
 setInterval(() => saveWorld(), 30000);
 
 ensureWorldDir();
@@ -2932,7 +3119,6 @@ loadAccounts();
 loadPlayerProfiles();
 loadCoinLedger();
 loadSpawnReservations();
-bakeMasterMapCache(true);
 server.listen(PORT, HOST, () => {
   log(`VoxelCraft server listening on http://${HOST}:${PORT} · active world ${world.id}`);
   log(`Game WebSocket: ws://${HOST}:${PORT}/ws`);

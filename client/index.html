@@ -292,17 +292,6 @@
 
 
 
-
-<style id="voxelcraft-server-style">
-  /* The public deployment is multiplayer-only. Keep the local client source
-     portable while hiding local-world controls in the generated shell. */
-  #btnSave,#btnLoad,#btnSaveFile,#btnLoadFile,#worldFileInput,#btnNew,
-  #seedInput,.opt:has(#seedInput),.opt:has(#mpServer),#mpServer,
-  .serverLocalHint { display:none !important; }
-  #btnMpDisconnect { display:inline-block; }
-  #menu .serverAuthNote { color:#9bf0a4; }
-</style>
-<script>window.__SERVER_DEPLOYMENT__=true;</script>
 </head>
 <body>
 <div id="app"></div>
@@ -366,7 +355,7 @@
 <div class="overlay" id="menu">
   <div class="panel">
     <h1>VOXELCRAFT</h1>
-    <p class="sub">MULTIPLAYER SERVER · BUILD · OWN · EARN · one shared Common Spawn Area.</p>
+    <p class="sub">BUILD · OWN · EARN · a shared world with one Common Spawn Area.</p>
     <div class="row">
       <div class="col">
         <button class="btn green" id="btnResume">RESUME GAME</button>
@@ -375,20 +364,20 @@
         <button class="btn green" id="btnSaveFile">DOWNLOAD WORLD FILE</button>
         <button class="btn" id="btnLoadFile">OPEN WORLD FILE</button>
         <input id="worldFileInput" type="file" accept=".json,.voxelcraft,application/json">
-        <div class="fileHint serverLocalHint">World files are disabled on the multiplayer server.</div>
-        <div class="opt serverLocalHint"><label>NEW WORLD SEED</label><input type="text" id="seedInput" placeholder="random seed"></div>
+        <div class="fileHint">World files include the seed, edits, player position and settings. They can be copied to another browser or device.</div>
+        <div class="opt"><label>NEW WORLD SEED</label><input type="text" id="seedInput" placeholder="random seed"></div>
         <button class="btn red" id="btnNew">CREATE NEW WORLD</button>
         <button class="btn" id="btnFull">TOGGLE FULLSCREEN</button>
         <h2>MULTIPLAYER</h2>
-        <div id="mpStatus">OFFLINE · LOGIN REQUIRED</div>
+        <div id="mpStatus">OFFLINE · Singleplayer</div>
         <div id="walletStatus">WALLET · <b id="menuWalletValue">0 COIN</b></div>
         <div class="opt"><label>USERNAME</label><input type="text" id="mpUsername" maxlength="24" autocomplete="username" placeholder="3–24 letters / numbers"></div>
         <div class="opt"><label>PASSWORD</label><input type="password" id="mpPassword" minlength="6" maxlength="128" autocomplete="current-password" placeholder="6+ characters"></div>
         <div class="opt"><label>DISPLAY NAME <span style="font-size:7px;color:#91a2b5">optional</span></label><input type="text" id="mpName" maxlength="24" placeholder="your name"></div>
-        <div class="opt serverLocalHint"><label>SERVER LINK <span style="font-size:7px;color:#91a2b5">blank = this server</span></label><input type="text" id="mpServer" placeholder="ws://192.168.1.20:3000/ws"></div>
+        <div class="opt"><label>SERVER LINK <span style="font-size:7px;color:#91a2b5">blank = this server</span></label><input type="text" id="mpServer" placeholder="ws://192.168.1.20:3000/ws"></div>
         <div class="fileHint">First login creates the account. Your Coin wallet starts at 0.</div>
         <button class="btn green" id="btnMpConnect">LOGIN / REGISTER</button>
-        <button class="btn red" id="btnMpDisconnect">LOG OUT</button>
+        <button class="btn red" id="btnMpDisconnect">DISCONNECT</button>
         <button class="btn green" id="btnStoreOpen">STORE · PREFABS</button>
         <button class="btn green" id="btnMarketOpen">PROPERTY MARKET</button>
         <button class="btn green" id="btnBusinessOpen">BUSINESSES · INCOME</button>
@@ -425,7 +414,7 @@
           <div><b>R</b> — return to spawn</div>
           <div><b>F3</b> — debug info</div>
           <div><b>ESC</b> — this menu</div>
-          <div class="serverLocalHint"><b>WORLD FILE</b> — local files are disabled on the multiplayer server</div>
+          <div><b>WORLD FILE</b> — download / open a portable world</div>
           <div><b>ENTER</b> — multiplayer chat</div>
           <div><b>M</b> — live satellite map</div>
         </div>
@@ -4890,35 +4879,6 @@ function bootStep(){
 }
 requestAnimationFrame(bootStep);
 requestAnimationFrame(frame);
-</script>
-
-<script>
-if(SERVER_DEPLOYMENT){
-  window.setServerAuthFormVisible=function(show){
-    ['mpUsername','mpPassword','mpName'].forEach(id=>{const el=document.getElementById(id);if(el&&el.parentElement)el.parentElement.style.display=show?'':'none';});
-    const login=document.getElementById('btnMpConnect'); if(login)login.style.display=show?'':'none';
-  };
-  function beginRememberedServerSession(){
-    let token='',username='',name='';
-    try{token=localStorage.getItem(SERVER_SESSION_STORAGE_KEY)||'';username=localStorage.getItem('voxelcraftMpUsername')||'';name=localStorage.getItem('voxelcraftMpName')||username; }catch(error){}
-    if(!token||!username){
-      window.setServerAuthFormVisible(true);
-      setMpStatus('OFFLINE · LOGIN REQUIRED');
-      return;
-    }
-    const connect=()=>{
-      if(!started){setTimeout(connect,100);return;}
-      const usernameInput=document.getElementById('mpUsername'),nameInput=document.getElementById('mpName');
-      if(usernameInput)usernameInput.value=username;
-      if(nameInput)nameInput.value=name;
-      window.setServerAuthFormVisible(false);
-      setMpStatus('CONNECTING · RESUMING SESSION');
-      multiplayer.connect(normaliseServerUrl(''),name,username,'',token);
-    };
-    connect();
-  }
-  setTimeout(beginRememberedServerSession,100);
-}
 </script>
 </body>
 </html>

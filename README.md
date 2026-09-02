@@ -1,13 +1,12 @@
 # VoxelCraft Multiplayer Server
 
-This is the multiplayer-only deployment for the full local/singleplayer `index.html` client. The local version remains available at the repository root; `npm start` generates a separate server shell at `server/public/index.html` that hides local-world controls and connects only to the current server origin.
+This repository contains the multiplayer deployment for VoxelCraft, a browser-based voxel sandbox (not a Vanilla/Paper/Bukkit Minecraft server). The portable local/singleplayer client source is kept in `client/index.html`; `npm start` generates `public/index.html`, a multiplayer-only shell that hides local-world controls and connects to the current server origin.
 
 ## Run locally
 
 ```bash
-cd server
-npm install
-ADMIN_TOKEN=use-a-long-secret SESSION_SECRET=another-long-secret npm start
+npm ci
+ADMIN_TOKEN=use-a-long-secret-long-enough SESSION_SECRET=another-long-secret-long-enough npm start
 ```
 
 The server will listen on `http://localhost:3000`.
@@ -16,7 +15,7 @@ The server will listen on `http://localhost:3000`.
 - Admin panel: `http://localhost:3000/admin`
 - WebSocket: `ws://localhost:3000/ws`
 
-The default token is `change-me`; set both `ADMIN_TOKEN` and `SESSION_SECRET` before exposing the server.
+For local development, omitted credentials use a temporary admin token (`change-me`) and an ephemeral session secret. Never expose that configuration publicly. Production requires an explicit `ADMIN_TOKEN` of at least 24 characters and a separate `SESSION_SECRET` of at least 32 characters. The admin API accepts the token only in the `x-admin-token` header, never in a URL.
 
 ## LAN
 
@@ -40,26 +39,26 @@ The client automatically changes the same-origin WebSocket to `wss://game.exampl
 
 ## Deploy to Render
 
-A ready-to-use `render.yaml` is included in this directory. In Render, create a Blueprint from the repository and select `server/render.yaml`, or create a Node Web Service with:
+A ready-to-use `render.yaml` is included in this repository. In Render, create a Blueprint from the repository and select `render.yaml`, or create a Node Web Service with:
 
 ```text
-Root Directory: server
+Root Directory: .
 Build Command: npm ci --omit=dev
 Start Command: npm start
 Health Check Path: /healthz
 ```
 
-The Blueprint uses a Persistent Disk at `/var/data` and sets `DATA_DIR=/var/data`, so Accounts, Wallet/Ledger, Spawn Reservations and World JSON survive deploys and restarts. It also generates `SESSION_SECRET` and `ADMIN_TOKEN`. Keep the generated secrets private. A Persistent Disk requires a paid Render service plan.
+The Blueprint uses a Persistent Disk at `/var/data` and sets `DATA_DIR=/var/data`, so Accounts, Wallet/Ledger, Spawn Reservations and World JSON survive deploys and restarts. It also generates `SESSION_SECRET` and `ADMIN_TOKEN`. Keep the generated secrets private. A Persistent Disk requires a paid Render service plan. The Blueprint pins Node 22 because the server uses the built-in `node:sqlite` module.
 
-The server binds to `0.0.0.0` and uses Render's `PORT` automatically. The public root serves the multiplayer-only client; the original local version is kept separately in the repository and is not used as the public server shell.
+The server binds to `0.0.0.0` and uses Render's `PORT` automatically. The public root serves the generated multiplayer-only client from `public/index.html`; the source client remains in `client/index.html` and is never modified by the build.
 
 Useful environment variables:
 
 ```text
 PORT=3000
 HOST=0.0.0.0
-ADMIN_TOKEN=use-a-long-secret
-SESSION_SECRET=another-long-secret
+ADMIN_TOKEN=replace-with-a-24-character-minimum-secret
+SESSION_SECRET=replace-with-a-separate-32-character-minimum-secret
 DATA_DIR=/var/data
 WORLD_SEED=18699877
 WORLD_NAME=My World
@@ -68,6 +67,31 @@ MAX_PLAYERS=20
 ```
 
 The server stores worlds as independent JSON files in `DATA_DIR/worlds/` (the default world is `main.json`) and autosaves every 30 seconds plus during shutdown. Backups are written to `DATA_DIR/worlds/backups/` when importing or replacing a world.
+
+## Repository and runtime data
+
+The files in `DATA_DIR` are runtime state, not source code. Account databases, wallets, ledgers, spawn reservations, world saves and backups are intentionally ignored by Git. A fresh checkout creates an empty `main` world and the required files on first start. Set `DATA_DIR` to a persistent location in production (the Render Blueprint uses `/var/data`).
+
+Do not commit passwords, password hashes, world saves or production backups. Use the server export/download endpoint and an external backup policy for operational backups. When upgrading an older checkout, copy its runtime files into the configured `DATA_DIR` before starting; do not add them to Git.
+
+The generated browser bundle is `public/index.html`; edit `client/index.html` and run `npm run build` rather than editing the generated file directly.
+
+## Development checks
+
+```bash
+npm run build
+npm test
+```
+
+The test suite uses a temporary data directory and exercises the generated client shell, health endpoint, public API and WebSocket account flow without modifying repository runtime data. It also checks the client/server movement contract, server-authoritative mode/flight handling, and voxel collision implementation. Node.js 22.5.0 or newer is required.
+
+## Client/server movement contract
+
+The server sends `physics` in `hello`, `joined`, `worldState` and `serverMode`. Both sides use the contract’s chunk size, world height, sea level, player dimensions, `stepHeight`, flight ceiling and auto-step flag. The client’s `playerState` message includes `onGround`, `inWater`, `sprint`, `fly` and `jump` in addition to position/orientation and selected block.
+
+The server owns the effective game mode and only accepts flight when the active world is Creative. It derives grounded and water state from the authoritative voxel map, rate-limits state updates, validates horizontal and vertical movement with separate envelopes (including fast falling and diagonal flight), validates jump transitions, tests the direct collision path, and then tests the bounded `stepHeight` path used by the client’s auto-step movement. Client optimistic edits are accepted only when their `oldId` matches the effective server voxel; occupied, missing, unbreakable and invalid blocks are rejected and the client restores its previous state.
+
+Server collision is generated from the same deterministic terrain, cave, ore, vegetation and landmark rules as `client/index.html`, rather than treating every `y <= terrainHeight` cell as solid. Generated water/lava remain non-solid, open doors are non-solid, and player edits override generated blocks. `objectInteractAccepted`, `objectInteractRejected` and `objectState` are handled by the client; NPC property additions are retained in the multiplayer state.
 
 ## Multi-world administration
 
@@ -85,7 +109,7 @@ Switching worlds is global in this MVP, not a per-world lobby: connected clients
 
 `database.json` in `DATA_DIR` is the primary durable account/profile database. It contains the Username, password hash/salt, stable Player ID, display name, Wallet and Claim entitlement state. It is written atomically on account creation, login, Wallet/Ledger changes and server shutdown, so restarting the Node process does not create a new Player. `accounts.json` and `players.json` in the same data directory are kept as readable compatibility mirrors and are automatically migrated when the database is first introduced.
 
-The client normally reconnects to the same server origin and uses the same normalized Username and Password. A different server, a different world folder, or a changed `server` directory is a different database.
+The client normally reconnects to the same server origin and uses the same normalized Username and Password. A different server, a different world folder, or a changed `DATA_DIR` is a different database.
 
 ## Current account and onboarding protocol
 
@@ -150,7 +174,7 @@ The client normally reconnects to the same server origin and uses the same norma
 ## Phase 7 Wallet and NPC buyback
 
 - Player profiles contain a persistent Wallet with `0 Coin` for new players; wallet state is sent as `walletUpdate`
-- `server/coin-ledger.json` is an append-only server-side ledger for credit and debit transactions
+- `coin-ledger.json` is an append-only server-side ledger for credit and debit transactions
 - `GET /api/wallet?playerId=...` returns the wallet balance and the last 20 ledger rows
 - A `propertySellNpc` WebSocket request pays exactly `80%` of the current Certified Value; only a complete Property can be sold and empty/incomplete Claims are rejected
 - The sale snapshot transfers Land, Building blocks, Objects, and Business License data into `world.npcProperties`
@@ -189,7 +213,7 @@ Business licenses are stored on the complete Property Claim and remain part of t
 
 ### Server-authoritative economics
 
-Every Business Cycle uses the Property’s land `Traffic` and `Demand`, the License `Reputation` and `Capacity` to calculate NPC customers and NPC income. The default cycle interval is 30 seconds and can be changed with `BUSINESS_TICK_MS` (minimum 15 seconds). Salary, Maintenance and Advertising are charged from the owner Wallet through `business_operating_cost`; every credit/debit carries the `businessId` in `server/coin-ledger.json`.
+Every Business Cycle uses the Property’s land `Traffic` and `Demand`, the License `Reputation` and `Capacity` to calculate NPC customers and NPC income. The default cycle interval is 30 seconds and can be changed with `BUSINESS_TICK_MS` (minimum 15 seconds). Salary, Maintenance and Advertising are charged from the owner Wallet through `business_operating_cost`; every credit/debit carries the `businessId` in `coin-ledger.json`.
 
 A Wallet is never allowed to become negative. If operating costs cannot be paid, the Business is marked `suspended`, unpaid cost is accumulated, Reputation decreases, NPC revenue stops and real-player visits are rejected. The next cycle retries the cost, allowing the Business to reopen when the owner has enough Coin.
 
@@ -272,7 +296,7 @@ The client exposes **OPEN RENTALS**, **OPEN COMPANIES** and **OPEN PREMIUM LAND 
 - Hostile ghosts are grounded two-legged humanoids on the client, approach players with bounded Grid/A* pathfinding, deal damage, reduce the synchronized health bar and trigger a server-controlled respawn
 - Hostile navigation treats terrain and saved block edits as solid, rejects moves requiring more than a one-block step or a missing floor, routes around two-block walls and cliff edges, and checks server line-of-sight before applying damage
 - Hostile ghosts are removed when the server clock enters daytime; singleplayer mirrors the same grounded movement, pathfinding, line-of-sight and day cleanup locally
-- Server map endpoint at `GET /api/map?x=0&z=0&radius=96&step=1` returns the authoritative RGB terrain raster, cabin markers and the active world seed; the connected client accepts that raster as the final frame for the requested revision and prevents a late Worker frame from overwriting it. The Worker remains the responsive pending/error fallback
+- Map Pipeline v3 uses `GET /api/map/tiles?x=0&z=0&radius=96&step=1` (with `/api/map` retained as a protocol alias) to return bounded 64×64 authoritative palette-index terrain tiles, revision/seed/world identity, deterministic vegetation and structure pixels, and cabin overlay markers. The client caches Mini and Full tile windows independently, chooses LOD steps 1/2/4, and never replaces a committed frame with an incomplete or stale response
 - Client-side low-poly entity models, movement animation, plus lightweight instanced flowers, grass and mushrooms around active chunks
 - Expanded object set: dirt path, wood fence, wooden door, lantern, crate, barrel, sign and bookshelf
 - Deterministic micro-cabins with doors, windows, lanterns, chest, table, bookshelf, barrel and path details; identical on clients using the same seed, with a guaranteed showcase cabin near the origin for immediate testing
@@ -281,10 +305,11 @@ The client exposes **OPEN RENTALS**, **OPEN COMPANIES** and **OPEN PREMIUM LAND 
 - Decorative props and storage blocks are targetable: crates, barrels and chests open a small supply panel, while benches, signs and street lamps provide contextual interactions; prop interactions are distance-validated by the server in Multiplayer
 - Server map responses include cabin markers for the Full Map and Mini-map
 - Full Map supports live pan by drag, wheel/pinch zoom from 20% to 800% (using coarser server raster steps when zoomed out), recenter with R, player/remote-player tracking and refreshes around the viewed area instead of behaving as a static image
-- Map generation uses a dedicated Web Worker with a simplified aerial WebGL scene on `OffscreenCanvas`, optional `ImageBitmap` output and a transferable `ArrayBuffer` fallback. The Worker owns separate Mini-map and Full Map tile caches (32×32 pixel tiles), reuses cached tiles while the player moves, and only sends a complete frame for atomic commit
-- The Worker uses zoom-aware LOD: Full Map uses step 1 when zoomed in, step 2 at normal scale, and step 4 when zoomed out. Missing tiles are generated on demand; the Main Thread only composites the finished snapshot and draws overlays
-- The previous complete snapshot remains visible until the replacement frame is complete. World edits and seed changes invalidate in-flight work; no partial raster is exposed. A staged animation-frame renderer remains only as a compatibility fallback when Web Workers are unavailable
-- Full Map keeps an independent high-detail snapshot/cache from the Mini-map. The Worker can render a satellite-style fallback with deterministic tree canopies/brush and cabin markers at a 1.5× Mini-map overscan area; once the Server raster for the requested world revision is accepted, it is kept as the authoritative visible snapshot. The Mini-map then applies player-yaw with a direct CSS transform to that same visible canvas; it no longer redraws a second rotated canvas or exposes black corners
+- Map Pipeline v3 renders only bounded 64×64 palette-index tiles in a CPU Worker (or a bounded main-thread fallback), with no map WebGL geometry or large index buffers. The Worker batches missing tiles, transfers compact one-byte-per-sample buffers, and the Main Thread composites only a fully validated tile set
+- The authoritative tile window is rechecked every 12 minutes (within the requested 10–20 minute interval) so newly visible house/structure blocks are picked up even without player movement; ordinary world edits still invalidate affected LOD tiles immediately
+- The client uses separate Mini-map and Full Map request/cache state over the same tile contract, zoom-aware LOD steps 1/2/4, revision/seed/world consistency checks, LRU memory bounds, and fixed view radius. Movement can reuse cached tiles without making the map radius or render workload grow with velocity
+- Every tile window is assembled in a temporary canvas before atomic snapshot commit. The last good Mini/Full frame remains visible during loading, pan, zoom, stale data, offline mode, Worker failure, or server errors; overlays (claims, players, labels and cabin markers) remain independent from the base raster
+- Full Map keeps independent high-detail tile-window state from the Mini-map. Its CPU Worker fallback includes deterministic terrain shading and vegetation, while server tiles add authoritative structure pixels and cabin markers. The Mini-map applies player yaw with a direct CSS transform; it does not create a second rotated raster or expose black corners
 - The main character is shown as a fixed directional `YOU` icon on both maps. Map titles, coordinates, compass, `YOU` and remote-player names are real DOM overlays outside the raster, so they remain upright while the Mini-map turns
 - The in-world Mini-map rotates the terrain and markers with the local player heading; the YOU marker stays fixed and the Full Map remains north-up
 - Mobile-only touch controls: movement joystick, look gesture, menu, map, mode, flight, sprint, up/down, jump, mine, place and inventory
