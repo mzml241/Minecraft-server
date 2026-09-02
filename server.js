@@ -35,6 +35,28 @@ function safeWorldId(value){
 }
 function worldPath(id){ return path.join(WORLD_DIR, `${safeWorldId(id)}.json`); }
 const WORLD_HEIGHT = 80;
+const SEA_LEVEL = 30;
+const MAX_FLIGHT_HEIGHT = 1000;
+// This is sent to every client so movement/collision constants are part of the
+// protocol rather than two silently drifting implementations.
+const PHYSICS_CONFIG = Object.freeze({
+  version: 1,
+  chunkSize: 16,
+  worldHeight: WORLD_HEIGHT,
+  seaLevel: SEA_LEVEL,
+  maxFlightHeight: MAX_FLIGHT_HEIGHT,
+  player: Object.freeze({ height: 1.8, halfWidth: 0.3, stepHeight: 1.05 }),
+  movement: Object.freeze({
+    walkSpeed: 4.4,
+    sprintSpeed: 6.6,
+    waterSpeed: 3.4,
+    flightSpeed: 13,
+    creativeMaxSpeed: 36,
+    survivalMaxSpeed: 18,
+    tickIntervalMs: 50,
+    autoStep: true
+  })
+});
 // Keep this in sync with the current client block registry (IDs 1 through 51).
 const MAX_BLOCK_ID = 51;
 const MAX_PLAYERS = Number(process.env.MAX_PLAYERS || 20);
@@ -804,6 +826,11 @@ function playerSummary(client) {
     yaw: client.yaw,
     pitch: client.pitch,
     mode: client.mode,
+    fly: client.fly,
+    sprint: client.sprint,
+    inWater: client.inWater,
+    onGround: client.onGround,
+    jump: client.jump,
     selectedBlock: client.selectedBlock,
     health:client.health,
     maxHealth:100,
@@ -915,6 +942,23 @@ class ServerMapNoise {
   }
   fade(t){ return t*t*t*(t*(t*6-15)+10); }
   g2(h,x,y){ const u=(h&1)?-x:x,v=(h&2)?-y:y; return u+v; }
+  g3(h,x,y,z){
+    switch(h&15){
+      case 0:return x+y; case 1:return -x+y; case 2:return x-y; case 3:return -x-y;
+      case 4:return x+z; case 5:return -x+z; case 6:return x-z; case 7:return -x-z;
+      case 8:return y+z; case 9:return -y+z; case 10:return y-z; case 11:return -y-z;
+      case 12:return x+y; case 13:return -y+z; case 14:return -x+y; default:return -y-z;
+    }
+  }
+  n3(x,y,z){
+    const fx=Math.floor(x),fy=Math.floor(y),fz=Math.floor(z),X=fx&255,Y=fy&255,Z=fz&255;
+    const xf=x-fx,yf=y-fy,zf=z-fz,p=this.p,u=this.fade(xf),v=this.fade(yf),w=this.fade(zf);
+    const A=p[X]+Y,AA=p[A]+Z,AB=p[A+1]+Z,B=p[X+1]+Y,BA=p[B]+Z,BB=p[B+1]+Z;
+    const x00=(a,b,c,d)=>this.g3(a,xf,b,c)*(1-u)+this.g3(d,xf-1,b,c)*u;
+    const y0=x00(p[AA],yf,zf,p[BA])*(1-v)+x00(p[AB],yf-1,zf,p[BB])*v;
+    const y1=x00(p[AA+1],yf,zf-1,p[BA+1])*(1-v)+x00(p[AB+1],yf-1,zf-1,p[BB+1])*v;
+    return (y0*(1-w)+y1*w);
+  }
   n2(x,y){
     const fx=Math.floor(x),fy=Math.floor(y),X=fx&255,Y=fy&255,xf=x-fx,yf=y-fy,p=this.p;
     const u=this.fade(xf),v=this.fade(yf),aa=p[p[X]+Y],ab=p[p[X]+Y+1],ba=p[p[X+1]+Y],bb=p[p[X+1]+Y+1];
@@ -939,14 +983,14 @@ function serverMapColumn(x,z){
   const r=n.b.fbm2(x*.0055-42.1,z*.0055+88.4,3),ridge=1-Math.abs(r);
   const riverNoise=Math.abs(n.b.fbm2(x*.0024+140.2,z*.0024-260.8,3));
   const river=1-serverSmoothstep(.025,.105,riverNoise);
-  let h=30+3+cont*10+hills*4.5+mMask*(ridge*ridge*46);
-  if(h<30+24) h-=river*9;
+  let h=SEA_LEVEL+3+cont*10+hills*4.5+mMask*(ridge*ridge*46);
+  if(h<SEA_LEVEL+24) h-=river*9;
   h=Math.max(4,Math.min(WORLD_HEIGHT-4,Math.floor(h)));
-  const temp=n.c.fbm2(x*.0006+900.5,z*.0006+300.1,2)-(h-30)*.010;
+  const temp=n.c.fbm2(x*.0006+900.5,z*.0006+300.1,2)-(h-SEA_LEVEL)*.010;
   const humid=n.c.fbm2(x*.0007-400.2,z*.0007+700.9,2);
   let biome;
-  if(h<=31&&river>.35) biome='river';
-  else if(h>30+36) biome='mountains';
+  if(h<=SEA_LEVEL+1&&river>.35) biome='river';
+  else if(h>SEA_LEVEL+36) biome='mountains';
   else if(temp>.22&&humid<.06) biome='desert';
   else if(temp<-.30) biome='snowy';
   else if(humid>.17) biome='forest';
@@ -955,6 +999,20 @@ function serverMapColumn(x,z){
 }
 function serverH2(x,z,salt){
   let h=Math.imul(x,0x27d4eb2d)^Math.imul(z,0x165667b1)^Math.imul(salt,0x9e3779b1); h^=h>>>15; h=Math.imul(h,0x85ebca6b); h^=h>>>13; h=Math.imul(h,0xc2b2ae35); h^=h>>>16; return (h>>>0)/4294967296;
+}
+function serverH3(x,y,z,salt){
+  let h=Math.imul(x,0x27d4eb2d)^Math.imul(y,0x165667b1)^Math.imul(z,0x9e3779b1)^Math.imul(salt|0,0x85ebca6b);
+  h^=h>>>15; h=Math.imul(h,0x2c1b3c6d); h^=h>>>12; h=Math.imul(h,0x297a2d39); h^=h>>>15;
+  return (h>>>0)/4294967296;
+}
+function serverCaveAt(wx,y,wz){
+  if(y<3) return false;
+  const n=serverMapNoise();
+  const a=n.c.n3(wx*.019,y*.036,wz*.019);
+  const b=n.c.n3(wx*.019+51.7,y*.036+11.3,wz*.019-30.4);
+  if(a*a+b*b<.0022) return true;
+  if(y<26&&n.b.n3(wx*.030,y*.045,wz*.030)>.55) return true;
+  return false;
 }
 function serverCabinSpec(cx,cz,cache){
   const key=cx+','+cz; if(cache.has(key)) return cache.get(key);
@@ -973,6 +1031,120 @@ function serverCabinRoof(x,z,terrain,cache){
   let top=spec.baseY+4; if(lz===7&&lx>3&&lx<12) top=spec.baseY+5;
   return top>=terrain.h?{h:top,id:12,biome:terrain.biome,edited:true}:null;
 }
+// Generated base voxels are resolved lazily from the same seed/hash/noise rules
+// used by client/index.html. Edits stay separate so a cache never hides an
+// authoritative player edit.
+const serverBaseChunkCache = new Map();
+let serverBaseChunkCacheSeed = null;
+function serverBaseChunkKey(cx,cz){ return `${cx},${cz}`; }
+function serverGenerateBaseChunk(cx,cz){
+  const data=new Uint8Array(16*16*WORLD_HEIGHT);
+  const set=(lx,y,lz,id)=>{ if(y>=0&&y<WORLD_HEIGHT) data[(y<<8)|(lz<<4)|lx]=id; };
+  const cols=[];
+  for(let lz=0;lz<16;lz++) for(let lx=0;lx<16;lx++){
+    const wx=cx*16+lx,wz=cz*16+lz,{h,biome}=serverMapColumn(wx,wz);
+    cols.push({h,biome});
+    let surf=1,sub=2,subDepth=3;
+    if(biome==='desert'){surf=5;sub=5;subDepth=4;}
+    else if(biome==='river'){surf=6;sub=5;subDepth=3;}
+    else if(biome==='snowy'){surf=17;}
+    else if(biome==='mountains'){surf=h>SEA_LEVEL+48?17:3;sub=3;}
+    if(h<=SEA_LEVEL+1){surf=(biome==='desert'||biome==='river')?5:(serverH3(wx,0,wz,7)<.35?6:5);sub=5;}
+    const top=Math.max(h,SEA_LEVEL);
+    for(let y=0;y<=top;y++){
+      let id;
+      if(y===0||(y<3&&serverH3(wx,y,wz,1)<.6-y*.25)) id=22;
+      else if(y<h-subDepth) id=3;
+      else if(y<h) id=sub;
+      else if(y===h) id=surf;
+      else id=y<=SEA_LEVEL?20:0;
+      if(id===3){
+        const o=serverH3(wx>>1,y>>1,wz>>1,2);
+        if(y<14&&o>.9970) id=26;
+        else if(y<26&&o>.9952) id=25;
+        else if(y<50&&o>.9905) id=24;
+        else if(o>.9835) id=23;
+        else if(y<22&&o<.004) id=21;
+      }
+      if(id!==0&&id!==20&&y<=h&&serverCaveAt(wx,y,wz)) id=(y<10&&serverH3(wx,y,wz,3)<.02)?28:0;
+      set(lx,y,lz,id);
+    }
+  }
+  const M=4;
+  for(let tz=-M;tz<16+M;tz++) for(let tx=-M;tx<16+M;tx++){
+    const wx=cx*16+tx,wz=cz*16+tz;
+    const col=(tx>=0&&tx<16&&tz>=0&&tz<16)?cols[tz*16+tx]:serverMapColumn(wx,wz),h=col.h,biome=col.biome,r=serverH3(wx,0,wz,11);
+    if(biome==='river'){
+      if(r<.018&&h>=SEA_LEVEL-1&&h<=SEA_LEVEL+1){
+        const ch=1+((serverH3(wx,1,wz,812)*2)|0);
+        for(let i=1;i<=ch;i++) if(tx>=0&&tx<16&&tz>=0&&tz<16) set(tx,h+i,tz,29);
+      }
+      continue;
+    }
+    if(h<=SEA_LEVEL+1) continue;
+    if(biome==='desert'){
+      if(r<.006){
+        const ch=2+((serverH3(wx,1,wz,12)*2)|0);
+        for(let i=1;i<=ch;i++) if(tx>=0&&tx<16&&tz>=0&&tz<16) set(tx,h+i,tz,29);
+      }
+      continue;
+    }
+    const spruce=biome==='snowy',dens=biome==='forest'?.055:biome==='snowy'?.030:biome==='plains'?.010:.004;
+    if(r>=dens||serverCaveAt(wx,h,wz)) continue;
+    const logId=spruce?9:7,leafId=spruce?10:8,th=(spruce?6:4)+((serverH3(wx,1,wz,13)*3)|0);
+    const put=(x,y,z,id,soft)=>{ if(x<0||x>=16||z<0||z>=16||y<0||y>=WORLD_HEIGHT)return; const i=(y<<8)|(z<<4)|x; if(soft&&data[i]!==0)return; data[i]=id; };
+    for(let i=1;i<=th;i++) put(tx,h+i,tz,logId,false);
+    if(spruce){
+      for(let ly=2;ly<=th+1;ly++){
+        const t=(ly-2)/(th-1),rad=Math.max(0,Math.round(2.6-t*2.4));
+        for(let dx=-rad;dx<=rad;dx++) for(let dz=-rad;dz<=rad;dz++){
+          if(Math.abs(dx)+Math.abs(dz)>rad+1)continue;
+          if(dx===0&&dz===0&&ly<=th)continue;
+          put(tx+dx,h+ly,tz+dz,leafId,true);
+        }
+      }
+      put(tx,h+th+2,tz,leafId,true);
+    } else {
+      for(let ly=th-2;ly<=th+1;ly++){
+        const rad=ly>=th?1:2;
+        for(let dx=-rad;dx<=rad;dx++) for(let dz=-rad;dz<=rad;dz++){
+          if(Math.abs(dx)===rad&&Math.abs(dz)===rad&&serverH3(wx+dx,ly,wz+dz,14)>.4)continue;
+          if(dx===0&&dz===0&&ly<=th)continue;
+          put(tx+dx,h+ly,tz+dz,leafId,true);
+        }
+      }
+    }
+  }
+  const cabinCache=new Map(),cabinChance=serverH2(cx,cz,901),showcaseCabin=cx===0&&cz===0;
+  if(cabinChance<.035||showcaseCabin){
+    const x0=3,z0=3,w=10,d=9,anchor=serverMapColumn(cx*16+7,cz*16+6);let minH=WORLD_HEIGHT,maxH=0;
+    for(let lz=z0;lz<z0+d;lz++) for(let lx=x0;lx<x0+w;lx++){const q=serverMapColumn(cx*16+lx,cz*16+lz);minH=Math.min(minH,q.h);maxH=Math.max(maxH,q.h);}
+    if(showcaseCabin||((anchor.biome==='plains'||anchor.biome==='forest')&&anchor.h>SEA_LEVEL+1&&anchor.h<WORLD_HEIGHT-9&&maxH-minH<=3)){
+      const baseY=anchor.h+1,putCabin=(x,y,z,id)=>{if(x>=0&&x<16&&z>=0&&z<16&&y>0&&y<WORLD_HEIGHT)data[(y<<8)|(z<<4)|x]=id;};
+      for(let z=z0;z<z0+d;z++)for(let x=x0;x<x0+w;x++)putCabin(x,baseY,z,11);
+      for(let y=1;y<=3;y++)for(let z=z0;z<z0+d;z++)for(let x=x0;x<x0+w;x++){
+        const edge=x===x0||x===x0+w-1||z===z0||z===z0+d-1;if(!edge)continue;let id=11;
+        if(z===z0&&x===x0+4&&y<=2)id=44;else if(y===2&&((x===x0||x===x0+w-1)&&z>z0+1&&z<z0+d-2))id=19;else if(y===2&&z===z0+d-1&&x>x0+1&&x<x0+w-2)id=19;
+        putCabin(x,baseY+y,z,id);
+      }
+      for(let z=z0-1;z<=z0+d;z++)for(let x=x0-1;x<=x0+w;x++){if(x<0||x>=16||z<0||z>=16)continue;if(x===x0-1||x===x0+w||z===z0-1||z===z0+d)putCabin(x,baseY,z,42);}
+      for(let z=z0-1;z<=z0+d;z++)for(let x=x0;x<x0+w;x++)if((x===x0||x===x0+w-1)&&z!==z0+1&&z!==z0+2)putCabin(x,baseY+1,z,43);
+      for(let z=z0;z<z0+d;z++)for(let x=x0;x<x0+w;x++)putCabin(x,baseY+4,z,12);
+      for(let x=x0+1;x<x0+w-1;x++)putCabin(x,baseY+5,z0+4,12);
+      putCabin(x0+1,baseY+3,z0,45);putCabin(x0+7,baseY+2,z0,48);putCabin(x0+2,baseY+1,z0+2,50);putCabin(x0+7,baseY+1,z0+2,49);putCabin(x0+5,baseY+1,z0+5,51);putCabin(x0+8,baseY+1,z0+6,47);
+    }
+  }
+  return data;
+}
+function serverBaseBlockAt(x,y,z){
+  if(y<0||y>=WORLD_HEIGHT)return 0;
+  if(serverBaseChunkCacheSeed!==world.seed){serverBaseChunkCacheSeed=world.seed;serverBaseChunkCache.clear();}
+  const cx=Math.floor(x/16),cz=Math.floor(z/16),key=serverBaseChunkKey(cx,cz);
+  let data=serverBaseChunkCache.get(key);
+  if(!data){data=serverGenerateBaseChunk(cx,cz);serverBaseChunkCache.set(key,data);if(serverBaseChunkCache.size>256)serverBaseChunkCache.delete(serverBaseChunkCache.keys().next().value);}
+  return data[(y<<8)|((z-cz*16)<<4)|(x-cx*16)]||0;
+}
+
 const SERVER_MAP_COLORS={
   1:[104,166,64],2:[134,96,67],3:[128,129,132],4:[110,110,112],5:[221,208,160],6:[140,134,128],
   7:[168,132,86],8:[58,112,44],9:[168,132,86],10:[38,84,52],11:[170,134,80],12:[112,84,52],
@@ -1198,41 +1370,29 @@ function serverTopAt(x,z){
   rebuildServerEditCaches();
   const bx=Math.floor(x), bz=Math.floor(z), column=bx+','+bz;
   const cached=serverTopCache.get(column); if(cached!==undefined) return cached;
-  const terrain=serverMapColumn(bx,bz).h;
   let top=-1;
   for(let y=WORLD_HEIGHT-1;y>=0;y--){
     const key=`${bx},${y},${bz}`, edit=world.edits?.[key];
     if(edit!==undefined){
       const id=Number(edit);
-      if(id>0 && !(id===44&&world.doors[key]===true)){ top=y; break; }
+      if(id>0&&id!==20&&id!==21&&!(id===44&&world.doors[key]===true)){ top=y; break; }
       continue;
     }
-    if(y<=terrain){ top=y; break; }
+    const id=serverBaseBlockAt(bx,y,bz);
+    if(id>0&&id!==20&&id!==21&&!(id===44&&world.doors[key]===true)){ top=y; break; }
   }
   serverTopCache.set(column,top); return top;
 }
-let serverCabinCacheSeed=null, serverCabinPathCache=new Map();
-function serverStaticCabinSolidAt(x,y,z){
-  const cx=Math.floor(x/16), cz=Math.floor(z/16), lx=x-cx*16, lz=z-cz*16;
-  if(serverCabinCacheSeed!==world.seed){ serverCabinCacheSeed=world.seed; serverCabinPathCache=new Map(); }
-  const spec=serverCabinSpec(cx,cz,serverCabinPathCache); if(!spec) return false;
-  const x0=3,z0=3,w=10,d=9,baseY=spec.baseY, inFootprint=lx>=x0&&lx<x0+w&&lz>=z0&&lz<z0+d;
-  if(y===baseY && inFootprint) return true;
-  if(y>=baseY+1&&y<=baseY+3&&inFootprint&&(lx===x0||lx===x0+w-1||lz===z0||lz===z0+d-1)){
-    const key=`${x},${y},${z}`;
-    return !(lz===z0&&lx===x0+4&&y<=baseY+2&&world.doors[key]===true);
-  }
-  if(y===baseY+1&&((lx===x0||lx===x0+w-1)&&lz>=z0-1&&lz<=z0+d)) return true;
-  if(y===baseY+4&&inFootprint) return true;
-  if(y===baseY+5&&lz===z0+4&&lx>x0&&lx<x0+w-1) return true;
-  return false;
+function serverBlockIdAt(x,y,z){
+  x=Math.floor(x); y=Math.floor(y); z=Math.floor(z); if(y<0||y>=WORLD_HEIGHT) return 0;
+  const key=`${x},${y},${z}`,edit=world.edits?.[key];
+  return edit===undefined?serverBaseBlockAt(x,y,z):Number(edit)||0;
 }
 function serverSolidAt(x,y,z){
   x=Math.floor(x); y=Math.floor(y); z=Math.floor(z); if(y<0||y>=WORLD_HEIGHT) return false;
-  const key=`${x},${y},${z}`, edit=world.edits?.[key];
-  if(edit!==undefined){ const id=Number(edit); if(id===0) return false; if(Number(id)===44&&world.doors[key]===true) return false; return true; }
-  if(serverStaticCabinSolidAt(x,y,z)) return true;
-  return y<=serverMapColumn(x,z).h;
+  const key=`${x},${y},${z}`,id=serverBlockIdAt(x,y,z);
+  if(id===0||id===20||id===21) return false;
+  return !(id===44&&world.doors[key]===true);
 }
 function serverWalkHeight(x,z){
   const top=serverTopAt(x,z), foot=top+1;
@@ -1310,9 +1470,15 @@ function spawnPointBlockedByClaim(point) {
   return world.claims.some(claim=>claimContainsPoint(claim,point.x,point.z,1));
 }
 
+function serverPublicLandmarkObjectAt(object,x,y,z){
+  const cx=Math.floor(x/16),cz=Math.floor(z/16),anchor=serverMapColumn(cx*16+7,cz*16+6),chance=serverH2(cx,cz,901),showcase=cx===0&&cz===0;
+  const available=showcase||(chance<.035&&(anchor.biome==='plains'||anchor.biome==='forest')&&anchor.h>SEA_LEVEL+1&&anchor.h<WORLD_HEIGHT-9);
+  if(!available) return false;
+  const points={lamp:[3,2],crate:[12,5],barrel:[12,7],bench:[6,12],sign:[5,2]},point=points[object];
+  return !!point&&Math.floor(x)===cx*16+point[0]&&Math.floor(z)===cz*16+point[1]&&Math.floor(y)===anchor.h+1;
+}
 function isPublicLandmarkPoint(x,z) {
-  const cx=Math.floor(x/16),cz=Math.floor(z/16),lx=x-cx*16,lz=z-cz*16,spec=serverCabinSpec(cx,cz,new Map());
-  return !!spec&&lx>=2&&lx<=13&&lz>=2&&lz<=12;
+  return ['lamp','crate','barrel','bench','sign'].some(object=>serverPublicLandmarkObjectAt(object,x,serverMapColumn(Math.floor(x),Math.floor(z)).h+1,z));
 }
 
 function claimIntersectsSpawnArea(claim) {
@@ -1474,9 +1640,9 @@ function analyzerBlockName(id){ return ANALYZER_BLOCK_NAMES[id]||`Block ${id}`; 
 function analyzerBlockValue(id){ return Number(ANALYZER_BLOCK_VALUES[id]||1); }
 function analyzerSolidAt(editMap,x,y,z){
   if(y<0||y>=WORLD_HEIGHT) return false;
-  const key=`${x},${y},${z}`;
-  if(editMap.has(key)) return Number(editMap.get(key))>0;
-  return y<=serverMapColumn(x,z).h;
+  const key=`${x},${y},${z}`,id=editMap.has(key)?Number(editMap.get(key)):serverBaseBlockAt(x,y,z);
+  if(id===0||id===20||id===21) return false;
+  return !(id===44&&world.doors[key]===true);
 }
 function analyzerAirRoomCount(editMap,bounds,floorY){
   const y=floorY+1; if(y>=WORLD_HEIGHT) return 0;
@@ -2169,6 +2335,7 @@ function worldState(forClient=null) {
       landAuctions: landAuctionsPayload(forClient?.playerId||null),
       landRegistry: {parcelSize:PARCEL_SIZE,basePrice:BASE_LAND_PRICE,currency:'Coin'},
       revision: world.revision,
+      physics: PHYSICS_CONFIG,
       edits: world.edits,
       doors: world.doors,
       lights: world.lights
@@ -2192,34 +2359,59 @@ function validBlockEdit(client, x, y, z) {
 }
 
 function serverPlayerCollides(px,py,pz){
-  const half=.3,height=1.8,x0=Math.floor(px-half),x1=Math.floor(px+half),y0=Math.floor(py),y1=Math.floor(py+height-.001),z0=Math.floor(pz-half),z1=Math.floor(pz+half);
+  const half=PHYSICS_CONFIG.player.halfWidth,height=PHYSICS_CONFIG.player.height;
+  const x0=Math.floor(px-half),x1=Math.floor(px+half),y0=Math.floor(py),y1=Math.floor(py+height-.001),z0=Math.floor(pz-half),z1=Math.floor(pz+half);
   for(let y=y0;y<=y1;y++) for(let z=z0;z<=z1;z++) for(let x=x0;x<=x1;x++) if(serverSolidAt(x,y,z)) return true;
   return false;
 }
-function serverPlayerMotionValid(client,nx,ny,nz,now){
-  if(![nx,ny,nz].every(Number.isFinite)||ny<-20||ny>1000) return false;
-  const elapsed=Math.max(.05,Math.min(.8,(now-(client.lastStateAt||now))/1000));
-  const isCreative=client.mode==='creative';
-  const maxSpeed=isCreative?36:18;
-  const maxDistance=maxSpeed*elapsed+3.5;
-  const dx=nx-client.x,dy=ny-client.y,dz=nz-client.z;
-  const dist=Math.hypot(dx,dy,dz);
-  if(dist>maxDistance) return false;
-
-  // Fast open-sky check: if player is flying above terrain level, skip voxel collision loop entirely
-  const startTop=serverTopAt(client.x,client.z), endTop=serverTopAt(nx,nz);
-  const highestGround=Math.max(startTop,endTop);
-  if(client.y>highestGround+2.2 && ny>highestGround+2.2){
-    return true; // Clear open airspace - 0 voxel collision steps needed!
-  }
-
-  const steps=Math.max(1,Math.ceil(Math.max(Math.abs(dx),Math.abs(dy),Math.abs(dz))/.6));
+function serverMotionPathClear(ax,ay,az,bx,by,bz){
+  const steps=Math.max(1,Math.ceil(Math.max(Math.abs(bx-ax),Math.abs(by-ay),Math.abs(bz-az))/.12));
   for(let step=1;step<=steps;step++){
     const t=step/steps;
-    const sy=client.y+dy*t;
-    if(sy<=highestGround+2.0 && serverPlayerCollides(client.x+dx*t,sy,client.z+dz*t)) return false;
+    if(serverPlayerCollides(ax+(bx-ax)*t,ay+(by-ay)*t,az+(bz-az)*t)) return false;
   }
   return true;
+}
+function serverPlayerInWater(px,py,pz){
+  const x=Math.floor(px),z=Math.floor(pz),feet=serverBlockIdAt(x,Math.floor(py+.2),z),eye=serverBlockIdAt(x,Math.floor(py+1.62),z);
+  return feet===20||eye===20;
+}
+function serverPlayerGrounded(px,py,pz){
+  if(serverPlayerCollides(px,py,pz)) return false;
+  return serverPlayerCollides(px,py-.08,pz);
+}
+function serverAutoStepPathClear(client,nx,ny,nz){
+  const stepHeight=PHYSICS_CONFIG.player.stepHeight,raisedY=client.y+stepHeight;
+  if(serverPlayerCollides(client.x,raisedY,client.z)) return false;
+  if(!serverMotionPathClear(client.x,raisedY,client.z,nx,raisedY,nz)) return false;
+  // The final descent is deliberately bounded by STEP_HEIGHT. This accepts a
+  // one-block stair/step but not a client-side teleport down a cliff.
+  if(ny<client.y||ny>raisedY+.001){
+    if(Math.abs(ny-client.y)>stepHeight+.08) return false;
+  }
+  return serverMotionPathClear(nx,raisedY,nz,nx,ny,nz);
+}
+function serverPlayerMotionValid(client,nx,ny,nz,now,motion={}){
+  if(![nx,ny,nz].every(Number.isFinite)||ny<-20||ny>MAX_FLIGHT_HEIGHT) return false;
+  const elapsed=Math.max(.05,Math.min(.8,(now-(client.lastStateAt||now))/1000));
+  const isCreative=client.mode==='creative',isFlying=isCreative&&motion.fly===true;
+  if(motion.fly===true&&!isCreative) return false;
+  const startInWater=serverPlayerInWater(client.x,client.y,client.z),inWater=serverPlayerInWater(nx,ny,nz);
+  const wasGrounded=serverPlayerGrounded(client.x,client.y,client.z),jumpEdge=motion.jump===true&&client.jump!==true;
+  const movement=PHYSICS_CONFIG.movement;
+  const maxSpeed=isFlying?movement.flightSpeed:(inWater?movement.waterSpeed:(motion.sprint===true?movement.sprintSpeed:movement.walkSpeed));
+  const maxDistance=maxSpeed*elapsed+1.15;
+  const dx=nx-client.x,dy=ny-client.y,dz=nz-client.z,dist=Math.hypot(dx,dy,dz);
+  if(dist>maxDistance) return false;
+  // A jump impulse may only begin while grounded (or while swimming). The
+  // reported jump/onGround bits are state hints; the server derives the
+  // actual support voxel before accepting the impulse.
+  if(jumpEdge&&!isFlying&&!startInWater&&!wasGrounded) return false;
+  if(!isFlying&&!inWater&&dy>0.62&&!wasGrounded&&!startInWater) return false;
+
+  if(serverMotionPathClear(client.x,client.y,client.z,nx,ny,nz)) return true;
+  if(!isFlying&&wasGrounded&&!startInWater&&PHYSICS_CONFIG.movement.autoStep&&serverAutoStepPathClear(client,nx,ny,nz)) return true;
+  return false;
 }
 
 function rejectPermission(ws,x,y,z,access) {
@@ -2227,9 +2419,16 @@ function rejectPermission(ws,x,y,z,access) {
 }
 
 function commitEdit(client, x, y, z, id, oldId = null) {
-  const key = editKey(x, y, z);
-  if (oldId !== null && world.edits[key] !== undefined && Number(world.edits[key]) !== Number(oldId)) {
-    send(client.ws, { type: 'editRejected', reason: 'block_changed', x, y, z });
+  const key = editKey(x, y, z),currentId=serverBlockIdAt(x,y,z);
+  if(oldId!==null&&currentId!==Number(oldId)){
+    send(client.ws,{type:'editRejected',reason:'block_changed',x,y,z});
+    return false;
+  }
+  if(id===0){
+    if(currentId===0){ send(client.ws,{type:'editRejected',reason:'block_not_found',x,y,z}); return false; }
+    if(currentId===22){ send(client.ws,{type:'editRejected',reason:'unbreakable_block',x,y,z}); return false; }
+  }else if(currentId!==0&&currentId!==20&&currentId!==21){
+    send(client.ws,{type:'editRejected',reason:'block_occupied',x,y,z});
     return false;
   }
   world.edits[key] = id;
@@ -2298,6 +2497,7 @@ function switchActiveWorld(id){
   bakeMasterMapCache(true);
   for(const client of clients.values()){
     client.mode=world.mode;
+    client.fly=false;
     if(client.joined){ client.spawn=allocateSpawnSlot(client.identityKey,client.playerId); client.x=client.spawn.x; client.y=client.spawn.y; client.z=client.spawn.z; }
     send(client.ws,{type:'serverWorldChanged',worldId:world.id});
     send(client.ws,worldState(client));
@@ -2409,6 +2609,7 @@ async function handleApi(req, res, url) {
       uptime: process.uptime(),
       players: clients.size,
       maxPlayers: MAX_PLAYERS,
+      physics: PHYSICS_CONFIG,
       activeWorldId,
       worlds: listWorlds(),
       world: {
@@ -2492,7 +2693,8 @@ async function handleApi(req, res, url) {
       world.mode = body.mode;
       for (const client of clients.values()) {
         client.mode = world.mode;
-        send(client.ws, { type: 'serverMode', mode: world.mode });
+        if(world.mode!=='creative') client.fly=false;
+        send(client.ws, { type: 'serverMode', mode: world.mode, physics:PHYSICS_CONFIG });
       }
       sendPlayers();
       return json(res, 200, { ok: true, mode: world.mode });
@@ -2560,6 +2762,11 @@ wss.on('connection', (ws, req) => {
     yaw: 0,
     pitch: 0,
     mode: world.mode,
+    fly: false,
+    sprint: false,
+    inWater: false,
+    onGround: false,
+    jump: false,
     selectedBlock: 1,
     health:100,
     connectedAt: new Date().toISOString(),
@@ -2575,7 +2782,8 @@ wss.on('connection', (ws, req) => {
     version: 1,
     playerId: null,
     sessionId: id,
-    maxPlayers: MAX_PLAYERS
+    maxPlayers: MAX_PLAYERS,
+    physics: PHYSICS_CONFIG
   });
 
   ws.on('message', raw => {
@@ -2604,9 +2812,10 @@ wss.on('connection', (ws, req) => {
       client.identityKey=resolved.identityKey;
       client.spawn=allocateSpawnSlot(client.identityKey,client.playerId);
       client.x=client.spawn.x; client.y=client.spawn.y; client.z=client.spawn.z;
+      client.fly=false; client.sprint=false; client.inWater=false; client.onGround=false; client.jump=false; client.lastStateAt=Date.now();
       client.joined = true;
       client.mode = world.mode;
-      send(ws, { type: 'joined', playerId: client.playerId, username:client.username, name: client.name, accountCreated:auth.created, sessionToken:issueRememberedSession(auth.account), freeClaimAvailable:resolved.profile.hasClaimedFree!==true, health:client.health, maxHealth:100, spawn:client.spawn, spawnArea:spawnAreaSummary(), claim:claimDetails(playerClaim(client.playerId),client.playerId), claims:claimsSummary() });
+      send(ws, { type: 'joined', playerId: client.playerId, username:client.username, name: client.name, accountCreated:auth.created, sessionToken:issueRememberedSession(auth.account), freeClaimAvailable:resolved.profile.hasClaimedFree!==true, health:client.health, maxHealth:100, spawn:client.spawn, spawnArea:spawnAreaSummary(), physics:PHYSICS_CONFIG, claim:claimDetails(playerClaim(client.playerId),client.playerId), claims:claimsSummary() });
       send(ws,{type:'storeCatalog',currency:'Coin',prefabs:prefabCatalogPayload(),allPaid:true});
       send(ws,propertyReportMessage(playerClaim(client.playerId)));
       send(ws,{type:'walletUpdate',wallet:walletSnapshot(client.playerId)});
@@ -2887,11 +3096,23 @@ function purchaseNpcClaim(client,result){
       // Creative flight can go well above the terrain ceiling; this is only a
       // safety limit, not a teleport-back-to-spawn boundary. The server still
       // validates the submitted motion against the same voxel collision map.
-      const nextY=clamp(number(message.y, client.y), -100, 1000),nextZ=clamp(number(message.z, client.z), -100000, 100000);
-      if(!serverPlayerMotionValid(client,nextX,nextY,nextZ,now)) return send(ws,{type:'playerStateRejected',reason:'collision_or_teleport',x:client.x,y:client.y,z:client.z});
+      const nextY=clamp(number(message.y, client.y), -100, MAX_FLIGHT_HEIGHT),nextZ=clamp(number(message.z, client.z), -100000, 100000);
+      const motion={
+        onGround:message.onGround===true,
+        inWater:message.inWater===true,
+        sprint:message.sprint===true,
+        fly:message.fly===true,
+        jump:message.jump===true
+      };
+      if(!serverPlayerMotionValid(client,nextX,nextY,nextZ,now,motion)) return send(ws,{type:'playerStateRejected',reason:'collision_or_teleport',x:client.x,y:client.y,z:client.z});
       client.x=nextX; client.y=nextY; client.z=nextZ; client.lastStateAt=now;
       client.yaw = number(message.yaw, client.yaw);
       client.pitch = clamp(number(message.pitch, client.pitch), -1.57, 1.57);
+      client.fly=motion.fly&&client.mode==='creative';
+      client.sprint=motion.sprint&&!client.fly;
+      client.inWater=serverPlayerInWater(nextX,nextY,nextZ);
+      client.onGround=serverPlayerGrounded(nextX,nextY,nextZ);
+      client.jump=motion.jump;
       client.selectedBlock = clamp(integer(message.selectedBlock, 1), 0, 255);
       return;
     }
@@ -2921,10 +3142,11 @@ function purchaseNpcClaim(client,result){
       if(!validBlockEdit(client,x,y,z)) return send(ws,{type:'objectInteractRejected',reason:'too_far_or_invalid',x,y,z,message:'Object is too far away or invalid'});
       const access=claimAccess(client,x,z,'use'); if(!access.ok) return rejectPermission(ws,x,y,z,access);
       const object=String(message.object||'').replace(/[^a-z0-9_-]/gi,'').slice(0,24);
-      const expectedIds={chest:50,crate:46,barrel:47,sign:48},key=editKey(x,y,z),stored=world.edits?.[key],isPublicLandmark=['bench','lamp','sign'].includes(object)&&isPublicLandmarkPoint(x,z);
-      // Storage and placed signs must be real server-side blocks. Only the
-      // generated public landmark props are allowed without an edit record.
-      if(!object||(expectedIds[object]!==undefined&&Number(stored)!==expectedIds[object]&&!isPublicLandmark)||(!expectedIds[object]&& !isPublicLandmark)) return send(ws,{type:'objectInteractRejected',reason:'object_not_found',x,y,z,message:'That interactive object is not present here'});
+      const expectedIds={chest:50,crate:46,barrel:47,sign:48},key=editKey(x,y,z),currentId=serverBlockIdAt(x,y,z),isPublicLandmark=serverPublicLandmarkObjectAt(object,x,y,z);
+      // Validate the effective voxel, including deterministic generated
+      // cabins. A client cannot turn a removed/private object into an
+      // interactable one by sending an object name alone.
+      if(!object||(expectedIds[object]!==undefined&&currentId!==expectedIds[object]&&!isPublicLandmark)||(!expectedIds[object]&&!isPublicLandmark)) return send(ws,{type:'objectInteractRejected',reason:'object_not_found',x,y,z,message:'That interactive object is not present here'});
       send(ws,{type:'objectInteractAccepted',object,x,y,z});
       broadcast({type:'objectState',object,x,y,z,by:client.id},client.id);
       return;
@@ -2938,7 +3160,7 @@ function purchaseNpcClaim(client,result){
         commitEdit(client, x, y, z, 0, message.oldId === undefined ? null : integer(message.oldId, -1));
       } else {
         const idValue = integer(message.id, 0);
-        if (idValue <= 0 || idValue > MAX_BLOCK_ID) return send(ws, { type: 'editRejected', reason: 'invalid_block', x, y, z });
+        if (idValue <= 0 || idValue > MAX_BLOCK_ID || idValue === 22) return send(ws, { type: 'editRejected', reason: 'invalid_block', x, y, z });
         commitEdit(client, x, y, z, idValue, message.oldId === undefined ? null : integer(message.oldId, -1));
       }
       return;

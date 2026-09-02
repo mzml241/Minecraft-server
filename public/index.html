@@ -1913,7 +1913,27 @@ const keys = {};
 const input = { fwd: 0, side: 0, jump: false, down: false };
 
 const EPS = 0.0001;
-const STEP_HEIGHT = 1.05;
+const CLIENT_PHYSICS_DEFAULT = {
+  version: 1,
+  chunkSize: CS,
+  worldHeight: H,
+  seaLevel: SEA,
+  maxFlightHeight: MAX_FLIGHT_HEIGHT,
+  player: { height: 1.8, halfWidth: 0.3, stepHeight: 1.05 },
+  movement: { walkSpeed: 4.4, sprintSpeed: 6.6, waterSpeed: 3.4, flightSpeed: 13, creativeMaxSpeed: 36, survivalMaxSpeed: 18, tickIntervalMs: 50, autoStep: true }
+};
+let serverPhysics = CLIENT_PHYSICS_DEFAULT;
+let STEP_HEIGHT = CLIENT_PHYSICS_DEFAULT.player.stepHeight;
+function applyServerPhysics(config){
+  if(!config||typeof config!=='object') return;
+  const mismatch = Number(config.worldHeight)!==H || Number(config.seaLevel)!==SEA || Number(config.chunkSize)!==CS;
+  if(mismatch){ console.warn('Server physics/world contract mismatch',config); return; }
+  const p=config.player||{};
+  if(Number.isFinite(Number(p.height))) player.height=clamp(Number(p.height),1,3);
+  if(Number.isFinite(Number(p.halfWidth))) player.half=clamp(Number(p.halfWidth),.15,.6);
+  if(Number.isFinite(Number(p.stepHeight))) STEP_HEIGHT=clamp(Number(p.stepHeight),0,.99*player.height);
+  serverPhysics=config;
+}
 
 function isAABBColliding(px, py, pz) {
   const h = player.half;
@@ -1982,7 +2002,7 @@ function moveAxisPrecise(axis, amount) {
 
 function moveWithAutoStep(dx, dz) {
   const p = player.pos;
-  const canAutoStep = player.onGround && !player.fly && !player.inWater;
+  const canAutoStep = serverPhysics.movement?.autoStep !== false && player.onGround && !player.fly && !player.inWater;
 
   if (canAutoStep) {
     const startX = p.x, startY = p.y, startZ = p.z;
@@ -2042,7 +2062,8 @@ function updatePlayer(dt) {
   }
   if (player.inWater && !wasWater) Snd.splash();
 
-  const speedBase = player.fly ? 13 : (player.inWater ? 3.4 : (player.sprint ? 6.6 : 4.4));
+  const movement=serverPhysics.movement||CLIENT_PHYSICS_DEFAULT.movement;
+  const speedBase = player.fly ? Number(movement.flightSpeed||13) : (player.inWater ? Number(movement.waterSpeed||3.4) : (player.sprint ? Number(movement.sprintSpeed||6.6) : Number(movement.walkSpeed||4.4)));
   const fwd = new THREE.Vector3(-Math.sin(player.yaw), 0, -Math.cos(player.yaw));
   const right = new THREE.Vector3(Math.cos(player.yaw), 0, -Math.sin(player.yaw));
   const wish = new THREE.Vector3().addScaledVector(fwd, input.fwd).addScaledVector(right, input.side);
@@ -3067,7 +3088,7 @@ function applyMultiplayerSpawn(spawn){
   const x=Number(spawn.x),z=Number(spawn.z),y=Number.isFinite(Number(spawn.y))?Number(spawn.y):SEA+8;
   spawnPoint.set(x,y,z); player.pos.set(x,y,z); player.vel.set(0,0,0); player.onGround=false; return true;
 }
-let myClaim=null, knownClaims=[], knownPlayers=[], claimSelectionMode=false, claimPreview=null, permissionPanelOpen=false, landInspectMode=false, landQuote=null, propertyReport=null, marketListings=[], marketCommissionRate=.05, prefabCatalog=[], prefabPreview=null, prefabGhost=null, businessTerritorySelection=null;
+let myClaim=null, knownClaims=[], knownPlayers=[], npcProperties=[], claimSelectionMode=false, claimPreview=null, permissionPanelOpen=false, landInspectMode=false, landQuote=null, propertyReport=null, marketListings=[], marketCommissionRate=.05, prefabCatalog=[], prefabPreview=null, prefabGhost=null, businessTerritorySelection=null;
 function applyClaimSnapshot(claim,claims){
   knownClaims=Array.isArray(claims)?claims.filter(item=>item&&Number.isInteger(Number(item.x))&&Number.isInteger(Number(item.z))).map(item=>({...item,x:Number(item.x),z:Number(item.z),size:16})):[];
   const requested=claim&&Number.isInteger(Number(claim.x))&&Number.isInteger(Number(claim.z))?{...claim,x:Number(claim.x),z:Number(claim.z),size:16}:null;
@@ -3174,7 +3195,7 @@ const multiplayer={
     this.socket.addEventListener('close',e=>{
       this.connected=false; this.joining=false; this.id=null; this.sendTimer=0;
       clearRemotePlayers(); clearAmbientEntities(); resetPlayerHealth();
-      applyClaimSnapshot(null,[]); knownPlayers=[]; claimSelectionMode=false; claimPreview=null; permissionPanelOpen=false; landInspectMode=false; landQuote=null; propertyReport=null; businessTerritorySelection=null; marketListings=[]; marketCommissionRate=.05; businesses=[]; rentals={offers:[],contracts:[]}; companies=[]; landAuctions=[]; walletState={balance:0,initialBalance:0,totalEarned:0,totalSpent:0,transactionCount:0,ledger:[]}; updateWalletHud(); prefabCatalog=[]; prefabPreview=null; constructionCatalog=[]; constructionJobs=[]; constructionPreview=null; clearPrefabGhost?.(); renderStoreCatalog?.(); renderConstructionDashboard?.(); updateClaimControls?.();
+      applyClaimSnapshot(null,[]); knownPlayers=[]; npcProperties=[]; claimSelectionMode=false; claimPreview=null; permissionPanelOpen=false; landInspectMode=false; landQuote=null; propertyReport=null; businessTerritorySelection=null; marketListings=[]; marketCommissionRate=.05; businesses=[]; rentals={offers:[],contracts:[]}; companies=[]; landAuctions=[]; walletState={balance:0,initialBalance:0,totalEarned:0,totalSpent:0,transactionCount:0,ledger:[]}; updateWalletHud(); prefabCatalog=[]; prefabPreview=null; constructionCatalog=[]; constructionJobs=[]; constructionPreview=null; clearPrefabGhost?.(); renderStoreCatalog?.(); renderConstructionDashboard?.(); updateClaimControls?.();
       setMpStatus('OFFLINE · '+(e.reason||'connection closed'),true);
       addMpChat('Disconnected from server');
     });
@@ -3188,9 +3209,10 @@ const multiplayer={
     if(show){ setMpStatus('OFFLINE · Singleplayer'); addMpChat('Multiplayer disconnected'); }
   },
   handle(m){
-    if(m.type==='hello'){ this.id=m.playerId||this.id; return; }
+    if(m.type==='hello'){ this.id=m.playerId||this.id; applyServerPhysics(m.physics); return; }
     if(m.type==='authRejected'){ this.connected=false; this.joining=false; if(SERVER_DEPLOYMENT&&this.sessionToken)this.clearRememberedSession(); window.setServerAuthFormVisible?.(true); setMpStatus('AUTH ERROR · '+(m.message||'login failed'),true); addMpChat(m.message||'Username/password login failed'); return; }
     if(m.type==='joined'){
+      applyServerPhysics(m.physics);
       this.connected=true; this.joining=false; this.id=m.playerId||this.id; this.username=m.username||this.username; this.name=m.name||this.name; this.freeClaimAvailable=m.freeClaimAvailable!==false;
       if(SERVER_DEPLOYMENT&&m.sessionToken){ this.sessionToken=String(m.sessionToken); try{localStorage.setItem(SERVER_SESSION_STORAGE_KEY,this.sessionToken);}catch(error){} window.setServerAuthFormVisible?.(false); }
 
@@ -3201,7 +3223,7 @@ const multiplayer={
       return;
     }
     if(m.type==='serverWorldChanged'){ setMpStatus('ONLINE · loading world '+String(m.worldId||'')); addMpChat('Server switched the active world · loading the new map…'); return; }
-    if(m.type==='worldState'){ const state=m.world||{}; if(state.rentals)rentals=state.rentals; if(Array.isArray(state.companies))companies=state.companies; if(Array.isArray(state.landAuctions))landAuctions=state.landAuctions; enterMultiplayerWorld(state); renderRentals?.(); renderCompanies?.(); renderAuctions?.(); return; }
+    if(m.type==='worldState'){ const state=m.world||{}; applyServerPhysics(state.physics); if(state.rentals)rentals=state.rentals; if(Array.isArray(state.companies))companies=state.companies; if(Array.isArray(state.landAuctions))landAuctions=state.landAuctions; enterMultiplayerWorld(state); renderRentals?.(); renderCompanies?.(); renderAuctions?.(); return; }
     if(m.type==='storeCatalog'){ prefabCatalog=Array.isArray(m.prefabs)?m.prefabs:[]; renderStoreCatalog?.(); return; }
     if(m.type==='propertyReport'){ propertyReport=m.ok?m.report:{ok:false,reason:m.reason||'unavailable',message:m.message||'Property report unavailable'}; renderPropertyReport?.(); return; }
     if(m.type==='walletUpdate'){ const prevBal=walletState?.balance||0; walletState=m.wallet||{balance:0}; if(walletState.balance!==prevBal&&started)Snd.coin(); updateWalletHud(); renderStoreCatalog?.(); renderMarketListings?.(); return; }
@@ -3254,6 +3276,11 @@ const multiplayer={
     if(m.type==='prefabPlaced'){ walletState=m.wallet||walletState; updateWalletHud(); prefabPreview={...m.placement,ok:true}; renderStoreCatalog?.(); showPrefabGhost(m.placement); toast(`${m.prefabId} placed · -${Number(m.price||0).toLocaleString()} Coin`); return; }
     if(m.type==='prefabPreview'){ const draft=prefabPreview||{}; if(m.ok){ prefabPreview={...m.placement,prefabId:m.placement?.prefabId||m.prefabId,ok:true,message:m.message||''}; showPrefabGhost({...m.placement,valid:true}); } else { prefabPreview={ok:false,reason:m.reason||'unavailable',message:m.message||'Prefab preview unavailable',price:m.price||null,prefabId:m.prefabId||draft.prefabId,x:draft.x,z:draft.z,rotation:draft.rotation,footprint:draft.footprint}; if(prefabPreview.footprint) showPrefabGhost({...prefabPreview,valid:false}); } renderStoreCatalog?.(); return; }
     if(m.type==='prefabRejected'){ if(Number.isFinite(Number(m.balance))) walletState={...walletState,balance:Number(m.balance)}; updateWalletHud(); prefabPreview={ok:false,reason:m.reason||'unavailable',message:m.message||'Prefab placement rejected',price:m.price||null}; renderStoreCatalog?.(); clearPrefabGhost(); toast(m.message||'Prefab placement rejected'); return; }
+    if(m.type==='npcPropertyAdded'){
+      if(m.property&&m.property.id) npcProperties=[...npcProperties.filter(property=>property.id!==m.property.id),m.property];
+      if(mapOverlay?.classList.contains('show')) redrawFullMap();
+      return;
+    }
     if(m.type==='claims'){ applyClaimSnapshot(myClaim,m.claims); return; }
     if(m.type==='landQuote'){ landQuote=m.ok?m.parcel:{status:'unavailable',message:m.message||'Land quote unavailable'}; const purchasable=m.ok&&(landQuote.status==='available'||landQuote.purchase?.available===true),quotePrice=landQuote.status==='available'&&multiplayer.freeClaimAvailable===true&&!myClaim?0:Number((landQuote.purchase?.price??landQuote.price)||0); claimPreview=purchasable?{ok:true,x:Number(landQuote.x),z:Number(landQuote.z),size:16,price:quotePrice,land:landQuote,acquisition:landQuote.purchase||null,message:''}:null; updateClaimControls(); redrawFullMap(); return; }
     if(m.type==='claimPermissionResult'){ applyClaimSnapshot(m.claim,m.claims); toast('Claim permissions updated'); return; }
@@ -3271,6 +3298,22 @@ const multiplayer={
     if(m.type==='players'){ knownPlayers=Array.isArray(m.players)?m.players:[]; updateRemotePlayers(knownPlayers); updateClaimPermissionPanel?.(); return; }
     if(m.type==='playerStateRejected'){
       if([m.x,m.y,m.z].every(value=>Number.isFinite(Number(value)))){ player.pos.set(Number(m.x),Number(m.y),Number(m.z)); player.vel.set(0,0,0); player.onGround=false; }
+      objectInteractCooldown=0;
+      return;
+    }
+    if(m.type==='objectInteractAccepted'){
+      objectInteractCooldown=0;
+      openObjectPanel(String(m.object||''),{x:Number(m.x)||0,y:Number(m.y)||0,z:Number(m.z)||0});
+      return;
+    }
+    if(m.type==='objectInteractRejected'){
+      objectInteractCooldown=0;
+      addMpChat(m.message||'Object interaction rejected');
+      toast(m.message||'Object interaction rejected');
+      return;
+    }
+    if(m.type==='objectState'){
+      addMpChat(`${m.object||'Object'} used by another player`);
       return;
     }
     if(m.type==='entities'){ updateAmbientEntities(m.entities||[]); return; }
@@ -3311,6 +3354,7 @@ const multiplayer={
     }
     if(m.type==='worldTime'){ dayTime=Number(m.dayTime)||0; return; }
     if(m.type==='serverMode'){
+      applyServerPhysics(m.physics);
       player.mode=m.mode==='survival'?'survival':'creative';
       if(player.mode==='survival') player.fly=false;
       updateMobileLabels(); toast('Server mode: '+player.mode); return;
@@ -3330,7 +3374,7 @@ const multiplayer={
     this.sendTimer+=dt;
     if(!paused && this.sendTimer>=0.05){
       this.sendTimer=0;
-      this.send({type:'playerState',x:player.pos.x,y:player.pos.y,z:player.pos.z,yaw:player.yaw,pitch:player.pitch,mode:player.mode,selectedBlock:hotbar[slot]});
+      this.send({type:'playerState',x:player.pos.x,y:player.pos.y,z:player.pos.z,yaw:player.yaw,pitch:player.pitch,mode:player.mode,onGround:player.onGround,inWater:player.inWater,sprint:player.sprint,fly:player.fly,jump:input.jump,selectedBlock:hotbar[slot]});
     }
   }
 };
@@ -3421,7 +3465,7 @@ function createRemotePlayer(data){
   group.add(makeNameSprite(data.name));
   group.position.set(Number(data.x)||0,Number(data.y)||0,Number(data.z)||0);
   scene.add(group);
-  const remote={group,target:group.position.clone(),yaw:Number(data.yaw)||0,name:data.name||'Player',mode:data.mode||'creative',walk:0,parts:{leftArmPivot,rightArmPivot,leftLegPivot,rightLegPivot,held}};
+  const remote={group,target:group.position.clone(),yaw:Number(data.yaw)||0,name:data.name||'Player',mode:data.mode||'creative',fly:!!data.fly,sprint:!!data.sprint,inWater:!!data.inWater,onGround:!!data.onGround,jump:!!data.jump,walk:0,parts:{leftArmPivot,rightArmPivot,leftLegPivot,rightLegPivot,held}};
   updateRemoteHeld(remote,data.selectedBlock);
   return remote;
 }
@@ -3436,7 +3480,7 @@ function updateRemotePlayers(list){
     active.add(data.id);
     let remote=remotePlayers.get(data.id); if(!remote){ remote=createRemotePlayer(data); remotePlayers.set(data.id,remote); }
     remote.target.set(Number(data.x)||0,Number(data.y)||0,Number(data.z)||0); remote.yaw=Number(data.yaw)||0; remote.group.rotation.y=remote.yaw;
-    remote.mode=data.mode||remote.mode; updateRemoteHeld(remote,data.selectedBlock);
+    remote.mode=data.mode||remote.mode; remote.fly=!!data.fly; remote.sprint=!!data.sprint; remote.inWater=!!data.inWater; remote.onGround=!!data.onGround; remote.jump=!!data.jump; updateRemoteHeld(remote,data.selectedBlock);
   }
   for(const [id,remote] of remotePlayers){ if(!active.has(id)){ disposeRemotePlayer(remote); remotePlayers.delete(id); } }
   const listEl=$('#mpPlayers');
@@ -3687,7 +3731,7 @@ function applyNetworkBlock(x,y,z,id){
   if(ch) setBlock(x,y,z,id); else setWorldEditOverride(x,y,z,id);
 }
 function enterMultiplayerWorld(w){
-  clearAmbientEntities(); resetPlayerHealth(); localAmbientNight=null; serverMapFailed=false; serverMapKey={mini:'',full:''}; serverSnapshotKey={mini:'',full:''}; markMapSnapshotsDirty();
+  clearAmbientEntities(); resetPlayerHealth(); npcProperties=Array.isArray(w.npcProperties)?w.npcProperties.filter(Boolean):[]; localAmbientNight=null; serverMapFailed=false; serverMapKey={mini:'',full:''}; serverSnapshotKey={mini:'',full:''}; markMapSnapshotsDirty();
   applyClaimSnapshot(w.claim,w.claims);
   SEED=Number(w.seed)|0; initNoise(); overrides.clear();
   const edits=w.edits||{};

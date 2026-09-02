@@ -38,6 +38,24 @@ function waitForOutput(child, pattern, timeoutMs = 10000) {
   });
 }
 
+function waitForMessage(socket, predicate, timeoutMs = 5000) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      socket.off('message', onMessage);
+      reject(new Error('Timed out waiting for expected WebSocket message'));
+    }, timeoutMs);
+    const onMessage = raw => {
+      let message;
+      try { message = JSON.parse(raw.toString()); } catch { return; }
+      if (!predicate(message)) return;
+      clearTimeout(timer);
+      socket.off('message', onMessage);
+      resolve(message);
+    };
+    socket.on('message', onMessage);
+  });
+}
+
 function openAndJoin(port) {
   return new Promise((resolve, reject) => {
     const socket = new WebSocket(`ws://127.0.0.1:${port}/ws`);
@@ -121,6 +139,57 @@ test('server exposes public APIs and authenticates a WebSocket player', async ()
     assert.equal(joined.message.username, 'smoketest');
     assert.match(joined.message.playerId, /^u_[a-f0-9]{16}$/);
     assert.equal(joined.message.freeClaimAvailable, true);
+    assert.equal(joined.message.physics.version, 1);
+    assert.equal(joined.message.physics.player.stepHeight, 1.05);
+
+    const physicsStatus = await (await fetch(`${base}/api/status`)).json();
+    assert.equal(physicsStatus.physics.worldHeight, 80);
+    assert.equal(physicsStatus.physics.seaLevel, 30);
+
+    const modeMessage = waitForMessage(joinedSocket, message => message.type === 'serverMode' && message.mode === 'survival');
+    const modeChange = await fetch(`${base}/api/admin/world/mode`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-admin-token': 'test-admin-token' },
+      body: JSON.stringify({ mode: 'survival' })
+    });
+    assert.equal(modeChange.status, 200);
+    await modeMessage;
+
+    joinedSocket.send(JSON.stringify({
+      type: 'playerState',
+      x: joined.message.spawn.x,
+      y: joined.message.spawn.y,
+      z: joined.message.spawn.z,
+      mode: 'creative',
+      fly: true,
+      onGround: false,
+      inWater: false,
+      sprint: false,
+      jump: false
+    }));
+    const rejectedFlight = await waitForMessage(joinedSocket, message => message.type === 'playerStateRejected');
+    assert.equal(rejectedFlight.reason, 'collision_or_teleport');
+    await new Promise(resolve => setTimeout(resolve, 25));
+
+    joinedSocket.send(JSON.stringify({
+      type: 'playerState',
+      x: joined.message.spawn.x,
+      y: joined.message.spawn.y,
+      z: joined.message.spawn.z,
+      mode: 'creative',
+      fly: false,
+      onGround: true,
+      inWater: false,
+      sprint: true,
+      jump: false,
+      selectedBlock: 1
+    }));
+    const players = await waitForMessage(joinedSocket, message => message.type === 'players' && message.players.some(player => player.id === joined.message.playerId && player.sprint === true));
+    const self = players.players.find(player => player.id === joined.message.playerId);
+    assert.equal(self.mode, 'survival');
+    assert.equal(self.fly, false);
+    assert.equal(self.sprint, true);
+    assert.equal(self.onGround, true);
 
     await new Promise(resolve => {
       joinedSocket.once('close', resolve);
