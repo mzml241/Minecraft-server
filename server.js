@@ -1191,22 +1191,6 @@ function serverMapColumnWithEdits(x,z,terrain,cabin,editColumns){
   }
   return base;
 }
-const MASTER_MAP_MIN = -512;
-const MASTER_MAP_MAX = 512;
-const MASTER_MAP_SPAN = MASTER_MAP_MAX - MASTER_MAP_MIN; // 1024
-const MASTER_MAP_STEP = 2;
-const MASTER_MAP_GRID = Math.floor(MASTER_MAP_SPAN / MASTER_MAP_STEP) + 1; // 513
-const MAP_SYNC_INTERVAL_MS = Math.max(10000, Number(process.env.MAP_SYNC_INTERVAL_MS || 10 * 60 * 1000)); // 10 minutes
-
-let masterMapCache = {
-  worldId: null,
-  seed: null,
-  pixels: null,
-  columns: null,
-  markers: []
-};
-const dirtyMapLocations = new Set();
-
 function computeMapColumnPixel(c, west, east, north, south) {
   const relief = ((west.h - east.h) + (north.h - south.h)) * .018;
   const light = Math.max(.40, Math.min(1.24, .84 + (c.h - 30) * .009 + relief));
@@ -1218,141 +1202,60 @@ function computeMapColumnPixel(c, west, east, north, south) {
   ];
 }
 
-function bakeMasterMapCache(force = false) {
-  if (!force && masterMapCache.pixels && masterMapCache.worldId === world.id && masterMapCache.seed === world.seed) return;
-  const t0 = Date.now();
-  const grid = MASTER_MAP_GRID, editColumns = serverMapEditColumns(), cabinCache = new Map();
-  const columns = new Array(grid * grid);
-
-  for (let gz = 0; gz < grid; gz++) {
-    const z = MASTER_MAP_MIN + gz * MASTER_MAP_STEP;
-    for (let gx = 0; gx < grid; gx++) {
-      const x = MASTER_MAP_MIN + gx * MASTER_MAP_STEP;
-      const terrain = serverMapColumn(x, z), cabin = serverCabinRoof(x, z, terrain, cabinCache);
-      columns[gz * grid + gx] = serverMapColumnWithEdits(x, z, terrain, cabin, editColumns);
+const MAP_TILE_SIZE = 64;
+const serverMapTileCache = new Map();
+function serverMapTileCacheKey(tx,tz,step){ return `${world.id}:${world.seed}:${world.revision}:${tx}:${tz}:${step}`; }
+function serverMapTile(tx,tz,step,sharedEditColumns=null){
+  const key=serverMapTileCacheKey(tx,tz,step),cached=serverMapTileCache.get(key);
+  if(cached){ serverMapTileCache.delete(key); serverMapTileCache.set(key,cached); return cached; }
+  const size=MAP_TILE_SIZE,worldSize=size*step,originX=tx*worldSize,originZ=tz*worldSize;
+  const editColumns=sharedEditColumns||serverMapEditColumns(),cabinCache=new Map(),padded=size+2,columns=new Array(padded*padded);
+  for(let gz=-1;gz<=size;gz++) for(let gx=-1;gx<=size;gx++){
+    const x=originX+gx*step,z=originZ+gz*step,terrain=serverMapColumn(x,z),cabin=serverCabinRoof(x,z,terrain,cabinCache);
+    columns[(gz+1)*padded+(gx+1)]=serverMapColumnWithEdits(x,z,terrain,cabin,editColumns);
+  }
+  const rgbPixels=Buffer.alloc(size*size*3);
+  for(let gz=0;gz<size;gz++) for(let gx=0;gx<size;gx++){
+    const i=(gz+1)*padded+(gx+1),c=columns[i],west=columns[i-1],east=columns[i+1],north=columns[i-padded],south=columns[i+padded],rgb=computeMapColumnPixel(c,west,east,north,south),p=(gz*size+gx)*3;
+    rgbPixels[p]=rgb[0]; rgbPixels[p+1]=rgb[1]; rgbPixels[p+2]=rgb[2];
+  }
+  // Keep vegetation and structure readable in the base raster. These are
+  // deliberately sparse pixel treatments; detailed labels remain overlays.
+  for(let gz=0;gz<size;gz++) for(let gx=0;gx<size;gx++){
+    const i=(gz+1)*padded+(gx+1),c=columns[i],x=originX+gx*step,z=originZ+gz*step,chance=serverH3(x,0,z,11);
+    const density=c.biome==='forest'?.055:c.biome==='snowy'?.030:c.biome==='plains'?.010:.004;
+    if(c.h>SEA_LEVEL+1&&c.id!==20&&c.id!==21&&chance<density){
+      const p=(gz*size+gx)*3,shade=c.biome==='snowy'?[68,104,116]:[42,112,56];
+      rgbPixels[p]=Math.round(rgbPixels[p]*.42+shade[0]*.58);rgbPixels[p+1]=Math.round(rgbPixels[p+1]*.42+shade[1]*.58);rgbPixels[p+2]=Math.round(rgbPixels[p+2]*.42+shade[2]*.58);
     }
-  }
-
-  const pixels = Buffer.alloc(grid * grid * 3);
-  for (let gz = 0; gz < grid; gz++) {
-    for (let gx = 0; gx < grid; gx++) {
-      const c = columns[gz * grid + gx];
-      const west = columns[gz * grid + Math.max(0, gx - 1)];
-      const east = columns[gz * grid + Math.min(grid - 1, gx + 1)];
-      const north = columns[Math.max(0, gz - 1) * grid + gx];
-      const south = columns[Math.min(grid - 1, gz + 1) * grid + gx];
-      const rgb = computeMapColumnPixel(c, west, east, north, south);
-      const p = (gz * grid + gx) * 3;
-      pixels[p] = rgb[0];
-      pixels[p + 1] = rgb[1];
-      pixels[p + 2] = rgb[2];
-    }
-  }
-
-  const markers = [];
-  for (const [key, spec] of cabinCache) {
-    if (!spec) continue;
-    const [cx, cz] = key.split(',').map(Number);
-    markers.push({ type: 'cabin', x: cx * 16 + 7.5, z: cz * 16 + 7.5 });
-  }
-
-  masterMapCache = {
-    worldId: world.id,
-    seed: world.seed,
-    pixels,
-    columns,
-    markers
-  };
-  dirtyMapLocations.clear();
-  log(`Baked master world map cache (1024×1024 span, ${grid}×${grid}) in ${Date.now() - t0}ms`);
-}
-
-function refreshMasterMapDeltas() {
-  if (!masterMapCache.pixels || !masterMapCache.columns || dirtyMapLocations.size === 0) return;
-  const grid = MASTER_MAP_GRID, editColumns = serverMapEditColumns(), cabinCache = new Map();
-  const updatedIndices = new Set();
-
-  for (const loc of dirtyMapLocations) {
-    const [x, z] = loc.split(',').map(Number);
-    if (x < MASTER_MAP_MIN || x > MASTER_MAP_MAX || z < MASTER_MAP_MIN || z > MASTER_MAP_MAX) continue;
-    const gx = Math.round((x - MASTER_MAP_MIN) / MASTER_MAP_STEP);
-    const gz = Math.round((z - MASTER_MAP_MIN) / MASTER_MAP_STEP);
-    if (gx >= 0 && gx < grid && gz >= 0 && gz < grid) {
-      const terrain = serverMapColumn(MASTER_MAP_MIN + gx * MASTER_MAP_STEP, MASTER_MAP_MIN + gz * MASTER_MAP_STEP);
-      const cabin = serverCabinRoof(MASTER_MAP_MIN + gx * MASTER_MAP_STEP, MASTER_MAP_MIN + gz * MASTER_MAP_STEP, terrain, cabinCache);
-      masterMapCache.columns[gz * grid + gx] = serverMapColumnWithEdits(MASTER_MAP_MIN + gx * MASTER_MAP_STEP, MASTER_MAP_MIN + gz * MASTER_MAP_STEP, terrain, cabin, editColumns);
-      for (let dz = -1; dz <= 1; dz++) {
-        for (let dx = -1; dx <= 1; dx++) {
-          const nx = gx + dx, nz = gz + dz;
-          if (nx >= 0 && nx < grid && nz >= 0 && nz < grid) updatedIndices.add(nz * grid + nx);
-        }
-      }
-    }
-  }
-
-  for (const idx of updatedIndices) {
-    const gx = idx % grid, gz = Math.floor(idx / grid);
-    const c = masterMapCache.columns[idx];
-    const west = masterMapCache.columns[gz * grid + Math.max(0, gx - 1)];
-    const east = masterMapCache.columns[gz * grid + Math.min(grid - 1, gx + 1)];
-    const north = masterMapCache.columns[Math.max(0, gz - 1) * grid + gx];
-    const south = masterMapCache.columns[Math.min(grid - 1, gz + 1) * grid + gx];
-    const rgb = computeMapColumnPixel(c, west, east, north, south);
-    const p = idx * 3;
-    masterMapCache.pixels[p] = rgb[0];
-    masterMapCache.pixels[p + 1] = rgb[1];
-    masterMapCache.pixels[p + 2] = rgb[2];
-  }
-
-  const count = dirtyMapLocations.size;
-  dirtyMapLocations.clear();
-  log(`10-minute map delta sync: updated ${count} dirty locations (${updatedIndices.size} pixels refreshed)`);
-}
-
-function serverMapRaster(url){
-  const centerX=integer(url.searchParams.get('x'),0), centerZ=integer(url.searchParams.get('z'),0);
-  const visibleRadius=clamp(integer(url.searchParams.get('radius'),96),48,420);
-  const requestedStep=Number(url.searchParams.get('step'));
-  const step=requestedStep===4?4:(requestedStep===2?2:1);
-  const radius=Math.max(visibleRadius+24,96), baseX=centerX-radius, baseZ=centerZ-radius;
-  const grid=Math.ceil((radius*2+1)/step);
-
-  // Fast-path: Sub-sample directly from pre-baked Master Map Cache (0ms CPU noise!)
-  if(masterMapCache.pixels && masterMapCache.worldId===world.id && masterMapCache.seed===world.seed &&
-     baseX>=MASTER_MAP_MIN && baseX+(grid-1)*step<=MASTER_MAP_MAX &&
-     baseZ>=MASTER_MAP_MIN && baseZ+(grid-1)*step<=MASTER_MAP_MAX){
-    const subPixels=Buffer.alloc(grid*grid*3);
-    const mGrid=MASTER_MAP_GRID;
-    for(let gz=0;gz<grid;gz++){
-      const z=baseZ+gz*step;
-      const mgz=Math.max(0,Math.min(mGrid-1,Math.round((z-MASTER_MAP_MIN)/MASTER_MAP_STEP)));
-      for(let gx=0;gx<grid;gx++){
-        const x=baseX+gx*step;
-        const mgx=Math.max(0,Math.min(mGrid-1,Math.round((x-MASTER_MAP_MIN)/MASTER_MAP_STEP)));
-        const srcP=(mgz*mGrid+mgx)*3;
-        const dstP=(gz*grid+gx)*3;
-        subPixels[dstP]=masterMapCache.pixels[srcP];
-        subPixels[dstP+1]=masterMapCache.pixels[srcP+1];
-        subPixels[dstP+2]=masterMapCache.pixels[srcP+2];
-      }
-    }
-    return {type:'mapRaster',worldId:world.id,seed:world.seed,baseX,baseZ,radius,step,grid,colors:subPixels.toString('base64'),markers:masterMapCache.markers};
-  }
-
-  const editColumns=serverMapEditColumns(), cabinCache=new Map(), columns=new Array(grid*grid);
-  for(let gz=0;gz<grid;gz++) for(let gx=0;gx<grid;gx++){
-    const x=baseX+gx*step,z=baseZ+gz*step, terrain=serverMapColumn(x,z), cabin=serverCabinRoof(x,z,terrain,cabinCache);
-    columns[gz*grid+gx]=serverMapColumnWithEdits(x,z,terrain,cabin,editColumns);
-  }
-  const pixels=Buffer.alloc(grid*grid*3);
-  for(let gz=0;gz<grid;gz++) for(let gx=0;gx<grid;gx++){
-    const c=columns[gz*grid+gx], west=columns[gz*grid+Math.max(0,gx-1)], east=columns[gz*grid+Math.min(grid-1,gx+1)], north=columns[Math.max(0,gz-1)*grid+gx], south=columns[Math.min(grid-1,gz+1)*grid+gx];
-    const rgb=computeMapColumnPixel(c,west,east,north,south), p=(gz*grid+gx)*3;
-    pixels[p]=rgb[0]; pixels[p+1]=rgb[1]; pixels[p+2]=rgb[2];
   }
   const markers=[];
-  for(const [key,spec] of cabinCache){ if(!spec) continue; const [cx,cz]=key.split(',').map(Number); markers.push({type:'cabin',x:cx*16+7.5,z:cz*16+7.5}); }
-  return {type:'mapRaster',worldId:world.id,seed:world.seed,baseX,baseZ,radius,step,grid,colors:pixels.toString('base64'),markers};
+  for(const [cKey,spec] of cabinCache){
+    if(!spec) continue;
+    const [cx,cz]=cKey.split(',').map(Number),x=cx*16+7.5,z=cz*16+7.5;
+    if(x>=originX&&x<originX+worldSize&&z>=originZ&&z<originZ+worldSize){
+      markers.push({type:'cabin',x,z});
+      const px=Math.round((x-originX)/step),pz=Math.round((z-originZ)/step),roofW=Math.max(1,Math.round(8/step)),roofD=Math.max(1,Math.round(7/step));
+      for(let dz=-Math.floor(roofD/2);dz<=Math.floor(roofD/2);dz++) for(let dx=-Math.floor(roofW/2);dx<=Math.floor(roofW/2);dx++){
+        const gx=px+dx,gz=pz+dz;if(gx<0||gz<0||gx>=size||gz>=size)continue;const p=(gz*size+gx)*3;rgbPixels[p]=126;rgbPixels[p+1]=82;rgbPixels[p+2]=48;
+      }
+    }
+  }
+  const indices=Buffer.alloc(size*size);
+  for(let i=0;i<indices.length;i++) indices[i]=((rgbPixels[i*3]>=192?3:rgbPixels[i*3]>=128?2:rgbPixels[i*3]>=64?1:0)<<4)|((rgbPixels[i*3+1]>=192?3:rgbPixels[i*3+1]>=128?2:rgbPixels[i*3+1]>=64?1:0)<<2)|(rgbPixels[i*3+2]>=192?3:rgbPixels[i*3+2]>=128?2:rgbPixels[i*3+2]>=64?1:0);
+  const tile={type:'mapTile',worldId:world.id,seed:world.seed,revision:world.revision,tx,tz,step,size,indices:indices.toString('base64'),markers};
+  serverMapTileCache.set(key,tile); if(serverMapTileCache.size>512) serverMapTileCache.delete(serverMapTileCache.keys().next().value);
+  return tile;
+}
+function serverMapTiles(url){
+  const centerX=integer(url.searchParams.get('x'),0),centerZ=integer(url.searchParams.get('z'),0),radius=clamp(integer(url.searchParams.get('radius'),96),48,420),requestedStep=Number(url.searchParams.get('step')),step=requestedStep===4?4:(requestedStep===2?2:1),size=MAP_TILE_SIZE,worldSize=size*step;
+  const minTX=Math.floor((centerX-radius)/worldSize),maxTX=Math.floor((centerX+radius)/worldSize),minTZ=Math.floor((centerZ-radius)/worldSize),maxTZ=Math.floor((centerZ+radius)/worldSize);
+  const tiles=[],editColumns=serverMapEditColumns();
+  for(let tz=minTZ;tz<=maxTZ;tz++) for(let tx=minTX;tx<=maxTX;tx++){
+    if(tiles.length>=49) break;
+    tiles.push(serverMapTile(tx,tz,step,editColumns));
+  }
+  return {type:'mapTiles',worldId:world.id,seed:world.seed,revision:world.revision,step,size,centerX,centerZ,radius,tiles};
 }
 let serverEditTopRevision=-1, serverEditTopSeed=null, serverEditTopsCache=new Map(), serverEditIdsCache=new Map(), serverTopCache=new Map();
 function rebuildServerEditCaches(){
@@ -2452,7 +2355,6 @@ function commitEdit(client, x, y, z, id, oldId = null) {
   }
   world.edits[key] = id;
   world.revision += 1;
-  dirtyMapLocations.add(`${x},${z}`);
   broadcast({ type: 'blockUpdate', x, y, z, id, revision: world.revision, by: client.id });
   const editedClaim=world.claims.find(claim=>claimContainsPoint(claim,x+.5,z+.5));
   if(editedClaim){
@@ -2513,7 +2415,6 @@ function switchActiveWorld(id){
   if(!next) return false;
   if(world.id!==next.id) saveWorld();
   activeWorldId=next.id; world=next; ensureDefaultLandAuctions(); entities.clear();
-  bakeMasterMapCache(true);
   for(const client of clients.values()){
     client.mode=world.mode;
     client.fly=false;
@@ -2537,8 +2438,8 @@ function createRandomWorld(payload={}){
 
 async function handleApi(req, res, url) {
   if (url.pathname === '/healthz') return json(res, 200, { ok: true });
-  if (url.pathname === '/api/map' && req.method === 'GET') {
-    return json(res, 200, serverMapRaster(url));
+  if ((url.pathname === '/api/map/tiles' || url.pathname === '/api/map') && req.method === 'GET') {
+    return json(res, 200, serverMapTiles(url));
   }
   if (url.pathname === '/api/land/quote' && req.method === 'GET') {
     const x=Number(url.searchParams.get('x')),z=Number(url.searchParams.get('z'));
@@ -3219,7 +3120,6 @@ setInterval(() => runBusinessCycle(), BUSINESS_TICK_MS);
 setInterval(() => runRentalCycle(), RENT_TICK_MS);
 setInterval(() => runLandAuctionCycle(), Math.max(1000, Math.min(RENT_TICK_MS, 10000)));
 setInterval(() => constructionRunCycle(), NPC_CONSTRUCTION_TICK_MS);
-setInterval(() => refreshMasterMapDeltas(), MAP_SYNC_INTERVAL_MS);
 setInterval(() => saveWorld(), 30000);
 
 ensureWorldDir();
@@ -3229,7 +3129,6 @@ loadAccounts();
 loadPlayerProfiles();
 loadCoinLedger();
 loadSpawnReservations();
-bakeMasterMapCache(true);
 server.listen(PORT, HOST, () => {
   log(`VoxelCraft server listening on http://${HOST}:${PORT} · active world ${world.id}`);
   log(`Game WebSocket: ws://${HOST}:${PORT}/ws`);

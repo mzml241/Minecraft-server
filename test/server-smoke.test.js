@@ -113,6 +113,17 @@ test('server exposes public APIs and authenticates a WebSocket player', async ()
     assert.equal(health.status, 200);
     assert.deepEqual(await health.json(), { ok: true });
 
+    const mapResponse = await fetch(`${base}/api/map/tiles?x=0&z=0&radius=96&step=2`);
+    assert.equal(mapResponse.status, 200);
+    const mapBody = await mapResponse.json();
+    assert.equal(mapBody.type, 'mapTiles');
+    assert.equal(mapBody.size, 64);
+    assert.equal(mapBody.step, 2);
+    assert.ok(mapBody.worldId);
+    assert.ok(Number.isInteger(mapBody.revision));
+    assert.ok(mapBody.tiles.length > 0 && mapBody.tiles.length <= 49);
+    assert.ok(mapBody.tiles.every(tile => tile.size === 64 && Buffer.from(tile.indices, 'base64').length === 64 * 64));
+
     const status = await fetch(`${base}/api/status`);
     assert.equal(status.status, 200);
     const statusBody = await status.json();

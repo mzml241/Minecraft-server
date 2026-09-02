@@ -838,49 +838,36 @@ Propهای تعاملی با raycast decoration یا block target تشخیص د�
 
 نقشه، نمای top-down raster است و جایگزین مشاهدهٔ سه‌بعدی کامل chunk نیست.
 
-### pipeline محلی
+### Map Pipeline v3 محلی
 
-اگر server map در دسترس نباشد، Worker داخلی map را می‌سازد:
+اگر tile سرور دیر برسد یا اتصال قطع باشد، مسیر پایهٔ map از Worker CPU استفاده می‌کند:
 
-1. seed و noiseهای همان terrain را آماده می‌کند؛
-2. برای هر pixel، ارتفاع، biome و top block را sample می‌کند؛
-3. relief را با چهار همسایه shade می‌کند؛
-4. tree/cactus/brush و shadow را روی raster می‌کشد؛
-5. cabin roof و marker را اضافه می‌کند؛
-6. در صورت وجود OffscreenCanvas، `ImageBitmap` قابل انتقال می‌فرستد؛
-7. در غیر این صورت RGBA buffer ارسال می‌کند.
+1. tile منطقی ۶۴×۶۴ را با seed و noise همان terrain تولید می‌کند؛
+2. ارتفاع، biome، top block، آب و lava را با relief چهار همسایه رنگ می‌کند؛
+3. vegetation به‌صورت deterministic و کم‌تراکم در raster اعمال می‌شود؛
+4. خروجی را به palette index یک‌بایتی برای هر sample تبدیل می‌کند؛
+5. tileها را به‌صورت batch و transferable buffer تحویل compositor می‌دهد.
 
-Tile cache با tileهای ۳۲ پیکسلی کار می‌کند و برای هر seed invalidation می‌گردد. اگر Worker موجود نباشد، fallback روی main thread با budget حدود ۴ میلی‌ثانیه در هر frame اجرا می‌شود تا UI قفل نشود.
+اگر Worker در دسترس نباشد، فقط tileهای missing با fallback محدود main-thread ساخته می‌شوند. هیچ مسیر map WebGL یا geometry/index buffer بزرگ وجود ندارد.
 
-### pipeline سروری
+### pipeline سروری و قرارداد tile
 
-در multiplayer، کلاینت ابتدا `/api/map?x=...&z=...&radius=...&step=...` را درخواست می‌کند. سرور پاسخ `mapRaster` می‌دهد:
+در multiplayer، کلاینت پنجرهٔ محدود tileها را از `/api/map/tiles?x=...&z=...&radius=...&step=...` دریافت می‌کند؛ `/api/map` فقط alias همین قرارداد است. پاسخ `mapTiles` شامل `worldId`، `seed`، `revision`، `step` و tileهای ۶۴×۶۴ است. هر tile مختصات `tx/tz` و `indices` به‌صورت base64 دارد؛ decoded payload دقیقاً ۴۰۹۶ byte است و هر byte با palette مشترک به RGB معتبر تبدیل می‌شود. markerهای cabin جدا از base raster بازگردانده می‌شوند.
 
-```json
-{
-  "type": "mapRaster",
-  "worldId": "main",
-  "seed": 18699877,
-  "baseX": -96,
-  "baseZ": -96,
-  "radius": 96,
-  "step": 1,
-  "grid": 193,
-  "colors": "base64 RGB",
-  "markers": [{"type":"cabin","x":7.5,"z":7.5}]
-}
-```
+Mini و Full request/cache مستقل دارند، اما قرارداد tile یکسان است. LODهای Full از stepهای `1`، `2` و `4` استفاده می‌کنند. شعاع view ثابت است و سرعت بازیکن آن را بزرگ نمی‌کند؛ حرکت فقط از tileهای cacheشده یا پنجرهٔ محدود بعدی استفاده می‌کند.
 
-هر pixel سه byte RGB دارد. server در محدودهٔ cache master map می‌تواند مستقیم sub-sample کند؛ خارج از آن، column و edit مؤثر را دوباره محاسبه می‌کند. editهای بازیکن و roof cabin در server raster لحاظ می‌شوند.
+### atomic commit و مقاومت در برابر black frame
+
+برای هر view، تمام tileهای موردنیاز ابتدا در canvas موقت compose و از نظر اندازه، seed، world، revision و کامل بودن payload اعتبارسنجی می‌شوند. سپس snapshot به‌صورت atomic جایگزین می‌شود. در loading، pan، zoom، حرکت سریع، پاسخ stale، خطای server، Worker failure و offline mode، آخرین frame سالم باقی می‌ماند؛ اگر هنوز frameی وجود نداشته باشد placeholder آبی/خنثی نمایش داده می‌شود، نه canvas سیاه. claim، player، label و cabin marker overlay مستقل از base raster هستند.
 
 ### server map در برابر local map
 
 وقتی multiplayer متصل است:
 
-- server raster برای همان request authoritative است؛
-- Worker محلی ممکن است هم‌زمان در حال ساخت باشد، اما نباید raster سروری معتبر را overwrite کند؛
-- در خطای `/api/map`، map عنوان `LOCAL SATELLITE` می‌گیرد؛
-- در حالت عادی عنوان `SERVER SATELLITE` است.
+- tile سرور برای world و revision معتبر authoritative است؛
+- tile محلی فقط fallback responsive است و نمی‌تواند snapshot سروری تازه را overwrite کند؛
+- world edit فقط نسخهٔ map و tileهای مربوط به view را invalidate می‌کند؛
+- در خطای endpoint، عنوان map به حالت tile محلی می‌رود ولی frame قبلی از بین نمی‌رود.
 
 ### محتوای map
 

@@ -116,10 +116,10 @@
   #mpChatLog { height:120px; overflow:auto; font-size:8px; line-height:1.7; color:#e5edf5; white-space:pre-wrap; margin-bottom:6px; }
   #mpChatInput { width:100%; font-family:inherit; font-size:8px; padding:8px; background:#0d1117; color:#fff; border:2px solid #000; }
   #mapHud { position:absolute; right:14px; top:72px; width:154px; pointer-events:none; filter:drop-shadow(3px 3px 0 rgba(0,0,0,.65)); }
-  #miniMapStage { position:relative; width:154px; height:154px; overflow:hidden; border:3px solid #05070a; outline:2px solid rgba(255,255,255,.25); background:#111923; }
+  #miniMapStage { position:relative; width:154px; height:154px; overflow:hidden; border:3px solid #05070a; outline:2px solid rgba(255,255,255,.25); background:#2b4053; }
   /* The rotated texture is rendered at 150% of the viewport so its corners
      remain covered at every yaw; the stage clips the overscan. */
-  #miniMap { position:absolute; left:-25%; top:-25%; right:auto; bottom:auto; display:block; width:150%; height:150%; image-rendering:pixelated; background:#111923; transform-origin:50% 50%; will-change:transform; }
+  #miniMap { position:absolute; left:-25%; top:-25%; right:auto; bottom:auto; display:block; width:150%; height:150%; image-rendering:pixelated; background:#2b4053; transform-origin:50% 50%; will-change:transform; }
   #mapHud label { display:block; text-align:center; margin-top:4px; font-size:7px; color:#e8f3ff; text-shadow:2px 2px #000; }
   .mapRasterText,.mapCompass { position:absolute; z-index:4; pointer-events:none; font:700 9px monospace; line-height:1.15; color:#fff; text-shadow:2px 2px 0 #000; }
   .mapRasterText { padding:3px 5px; background:rgba(0,0,0,.58); }
@@ -203,7 +203,7 @@
   #objectBody .objectCard button { flex:1; margin:0; padding:9px; font-size:8px; }
   #objectBody .objectNote { color:#9fb0c4; margin:8px 0 14px; }
   #mapOverlay .panel { width:min(980px,96vw); padding:18px; text-align:center; }
-  #worldMapStage { position:relative; width:min(75vh,84vw); height:min(75vh,84vw); max-width:100%; margin:10px auto 12px; overflow:hidden; background:#101820; border:4px solid #05070a; box-shadow:inset 0 0 0 2px #718094,0 10px 30px #0008; }
+  #worldMapStage { position:relative; width:min(75vh,84vw); height:min(75vh,84vw); max-width:100%; margin:10px auto 12px; overflow:hidden; background:#2b4053; border:4px solid #05070a; box-shadow:inset 0 0 0 2px #718094,0 10px 30px #0008; }
   #worldMap { position:absolute; inset:0; display:block; width:100%; height:100%; image-rendering:pixelated; touch-action:none; cursor:grab; }
   #worldMap.dragging { cursor:grabbing; }
   #fullMapTitle { left:8px; top:8px; }
@@ -925,8 +925,9 @@ const MAX_FLIGHT_HEIGHT=1000;
 const chunks = new Map();
 const overrides = new Map(); // "cx,cz" -> Map(idx->id)
 let mapSnapshotDirty = true, fullMapSnapshotDirty = true, mapDataVersion=0;
+let mapTileInvalidator=null;
 let mapServerMarkers={mini:[],full:[]};
-function markMapSnapshotsDirty(){ mapSnapshotDirty=true; fullMapSnapshotDirty=true; mapServerMarkers={mini:[],full:[]}; mapDataVersion++; }
+function markMapSnapshotsDirty(x=null,z=null){ mapSnapshotDirty=true; fullMapSnapshotDirty=true; mapServerMarkers={mini:[],full:[]}; mapDataVersion++; mapTileInvalidator?.(x,z); }
 const ck = (cx,cz)=>cx+','+cz;
 
 let SEED = (Math.random()*1e9)|0;
@@ -1138,7 +1139,7 @@ function setBlock(x,y,z,id){
   c.mapTop=null;
   openDoors.delete(voxelKey(x,y,z)); lanternOff.delete(voxelKey(x,y,z));
   if(c.decor){decorRoots.delete(c.decor);scene.remove(c.decor);c.decor=null;}
-  markMapSnapshotsDirty();
+  markMapSnapshotsDirty(x,z);
   let ov=overrides.get(ck(cx,cz)); if(!ov){ ov=new Map(); overrides.set(ck(cx,cz),ov); }
   ov.set(idx,id);
   buildChunkMesh(c);
@@ -3332,6 +3333,7 @@ const multiplayer={
     if(m.type==='doorState'){ applyDoorState(Number(m.x)||0,Number(m.y)||0,Number(m.z)||0,!!m.open); return; }
     if(m.type==='lightState'){ applyLanternState(Number(m.x)||0,Number(m.y)||0,Number(m.z)||0,!!m.on); return; }
     if(m.type==='blockUpdate'){
+      if(Number.isFinite(Number(m.revision))) mapWorldRevision=Math.max(mapWorldRevision,Number(m.revision));
       if(Number.isInteger(m.x)&&Number.isInteger(m.y)&&Number.isInteger(m.z)){
         const k=`${m.x},${m.y},${m.z}`;
         pendingOptimisticEdits.delete(k);
@@ -3739,13 +3741,14 @@ function normaliseServerUrl(value){
 function setWorldEditOverride(x,y,z,id){
   const cx=Math.floor(x/CS),cz=Math.floor(z/CS),lx=x-cx*CS,lz=z-cz*CS,idx=(y<<8)|(lz<<4)|lx;
   let map=overrides.get(ck(cx,cz)); if(!map){map=new Map();overrides.set(ck(cx,cz),map);} map.set(idx,id);
-  markMapSnapshotsDirty();
+  markMapSnapshotsDirty(x,z);
 }
 function applyNetworkBlock(x,y,z,id){
   const cx=Math.floor(x/CS),cz=Math.floor(z/CS),ch=chunks.get(ck(cx,cz));
   if(ch) setBlock(x,y,z,id); else setWorldEditOverride(x,y,z,id);
 }
 function enterMultiplayerWorld(w){
+  mapWorldId=String(w.id||'');mapWorldRevision=Number(w.revision)||0;
   clearAmbientEntities(); resetPlayerHealth(); npcProperties=Array.isArray(w.npcProperties)?w.npcProperties.filter(Boolean):[]; localAmbientNight=null; serverMapFailed=false; serverMapKey={mini:'',full:''}; serverSnapshotKey={mini:'',full:''}; markMapSnapshotsDirty();
   applyClaimSnapshot(w.claim,w.claims);
   SEED=Number(w.seed)|0; initNoise(); overrides.clear();
@@ -3859,8 +3862,9 @@ function drawMapMarker(ctx,x,z,yaw,color,me,label){
 }
 let mapRadius=70;
 function dynamicMapRadius(){
-  const speed=Math.hypot(player.vel.x,player.vel.z);
-  const wanted=clamp(68+speed*5.2,68,132);
+  // Keep the map workload stable during sprinting and fast travel. Directional
+  // prefetch is handled by the tile request window, not by enlarging the view.
+  const profile=qualityProfile(),wanted=settings.quality==='low'?88:settings.quality==='high'?120:104;
   mapRadius=lerp(mapRadius,wanted,.18);
   return Math.round(mapRadius);
 }
@@ -3926,12 +3930,23 @@ function drawMapPlayer(ctx,remote,centerX,centerZ,tile,canvasSize,radius,labelSt
     addDynamicMapLabel(labelStage,ctx.canvas,edge.x,edge.z,name+' '+Math.round(distance)+'m',miniRotation);
   }
 }
-let mapSnapshot={canvas:null,baseX:0,baseZ:0,radius:0,step:1,grid:0,centerX:0,centerZ:0,server:false};
-let fullMapSnapshot={canvas:null,baseX:0,baseZ:0,radius:0,step:1,grid:0,centerX:0,centerZ:0,server:false};
-let serverMapFetch={mini:null,full:null}, serverMapKey={mini:'',full:''}, serverSnapshotKey={mini:'',full:''}, serverMapFailed=false, serverMapRequestTarget='mini';
+let mapSnapshot={canvas:null,baseX:0,baseZ:0,radius:0,step:1,grid:0,centerX:0,centerZ:0,server:false,markers:[]};
+let fullMapSnapshot={canvas:null,baseX:0,baseZ:0,radius:0,step:1,grid:0,centerX:0,centerZ:0,server:false,markers:[]};
+let serverMapFetch={mini:null,full:null}, serverMapKey={mini:'',full:''}, serverSnapshotKey={mini:'',full:''}, serverMapFailed=false, serverMapRetryAt=0, serverMapRequestTarget='mini';
 const fullMapView={zoom:1,panX:0,panZ:0};
-const MINI_MAP_OVERSCAN=1.5;
+const MINI_MAP_OVERSCAN=1.5, MAP_TILE_SIZE=64, MAP_TILE_CACHE_LIMIT=128, MAP_INDEX_LEVELS=[0,85,170,255];
+function mapIndexRGB(index){return [MAP_INDEX_LEVELS[(index>>4)&3],MAP_INDEX_LEVELS[(index>>2)&3],MAP_INDEX_LEVELS[index&3]];}
 let miniMapRotation=NaN;
+const mapTileCaches={mini:new Map(),full:new Map()}, mapTileJobs={mini:null,full:null};
+let mapWorldId='', mapWorldRevision=0;
+mapTileInvalidator=(x,z)=>{
+  if(!Number.isFinite(Number(x))||!Number.isFinite(Number(z))){mapTileCaches.mini.clear();mapTileCaches.full.clear();localMapMarkerCache?.clear?.();return;}
+  for(const step of [1,2,4]){const span=MAP_TILE_SIZE*step,tx=Math.floor(Number(x)/span),tz=Math.floor(Number(z)/span);for(const target of ['mini','full'])for(let dz=-1;dz<=1;dz++)for(let dx=-1;dx<=1;dx++){mapTileCaches[target].delete(mapTileKey('local',step,tx+dx,tz+dz));mapTileCaches[target].delete(mapTileKey('server',step,tx+dx,tz+dz));}}
+  localMapMarkerCache?.clear?.();
+};
+let mapWorker=null,mapWorkerUrl='',mapWorkerRequestId=0;
+const mapWorkerPending=new Map();
+
 function updateMiniMapRotation(){
   const yaw=Number(player.yaw)||0;
   if(yaw===miniMapRotation) return;
@@ -3946,13 +3961,9 @@ function updateFullMapPlayerMarker(){
   }
   const size=fullMapFrame.canvasSize,tile=size/fullMapFrame.worldSpan;
   const playerX=size/2+(player.pos.x-fullMapFrame.centerX)*tile,playerZ=size/2+(player.pos.z-fullMapFrame.centerZ)*tile;
-  const visible=playerX>=0&&playerZ>=0&&playerX<=size&&playerZ<=size;
-  const margin=24,x=visible?playerX:clamp(playerX,margin,size-margin),z=visible?playerZ:clamp(playerZ,margin,size-margin);
-  fullMapYou.style.display='block';
-  fullMapYou.style.left=(x/size*100)+'%'; fullMapYou.style.top=(z/size*100)+'%';
-  fullMapYou.classList.toggle('edge',!visible);
-  // The normal marker follows the player yaw. When panned away, the arrow
-  // instead points from the edge marker toward the player's true position.
+  const visible=playerX>=0&&playerZ>=0&&playerX<=size&&playerZ<=size,margin=24;
+  const x=visible?playerX:clamp(playerX,margin,size-margin),z=visible?playerZ:clamp(playerZ,margin,size-margin);
+  fullMapYou.style.display='block'; fullMapYou.style.left=(x/size*100)+'%'; fullMapYou.style.top=(z/size*100)+'%'; fullMapYou.classList.toggle('edge',!visible);
   const markerAngle=visible?-(Number(player.yaw)||0):Math.atan2(playerX-x,-(playerZ-z));
   if(fullMapYouIcon) fullMapYouIcon.style.transform=`rotate(${markerAngle}rad)`;
 }
@@ -3964,363 +3975,217 @@ function mapStepForView(full,zoom=1){
   if(zoom<1.02) return 2;
   return 1;
 }
-/*
- * MAP PIPELINE v2
- * The expensive part is now a tile-cache renderer in a dedicated Worker.
- * The visible canvases only receive a complete, transferable RGBA frame at
- * commit time; overlay labels, HUD and markers are still drawn separately.
- */
-const mapWorkerSource=String.raw`
-const CS=16,H=80,SEA=30,TILE_PIXELS=32,AIR=0;
-const clamp=(v,a,b)=>v<a?a:v>b?b:v;
-const lerp=(a,b,t)=>a+(b-a)*t;
-const smoothstep=(a,b,x)=>{const t=clamp((x-a)/(b-a),0,1);return t*t*(3-2*t);};
-function h2(x,y,seed){let h=Math.imul(x,0x27d4eb2d)^Math.imul(y,0x165667b1)^Math.imul(seed,0x9e3779b1);h^=h>>>15;h=Math.imul(h,0x85ebca6b);h^=h>>>13;h=Math.imul(h,0xc2b2ae35);h^=h>>>16;return(h>>>0)/4294967296;}
-function h3(x,y,z,seed){let h=Math.imul(x,0x27d4eb2d)^Math.imul(y,0x165667b1)^Math.imul(z,0x9e3779b1)^Math.imul(seed|0,0x85ebca6b);h^=h>>>15;h=Math.imul(h,0x2c1b3c6d);h^=h>>>12;h=Math.imul(h,0x297a2d39);h^=h>>>15;return(h>>>0)/4294967296;}
-function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};}
-class Noise{
-  constructor(seed){const perm=new Uint8Array(256);for(let i=0;i<256;i++)perm[i]=i;const rnd=mulberry32(seed>>>0);for(let i=255;i>0;i--){const j=(rnd()*(i+1))|0,t=perm[i];perm[i]=perm[j];perm[j]=t;}this.p=new Uint8Array(512);for(let i=0;i<512;i++)this.p[i]=perm[i&255];}
-  fade(t){return t*t*t*(t*(t*6-15)+10);}
-  g2(h,x,y){const u=(h&1)?-x:x,v=(h&2)?-y:y;return u+v;}
-  g3(h,x,y,z){switch(h&15){case 0:return x+y;case 1:return -x+y;case 2:return x-y;case 3:return -x-y;case 4:return x+z;case 5:return -x+z;case 6:return x-z;case 7:return -x-z;case 8:return y+z;case 9:return -y+z;case 10:return y-z;case 11:return -y-z;case 12:return x+y;case 13:return -y+z;case 14:return -x+y;default:return -y-z;}}
-  n2(x,y){const fx=Math.floor(x),fy=Math.floor(y),X=fx&255,Y=fy&255,xf=x-fx,yf=y-fy,p=this.p,u=this.fade(xf),v=this.fade(yf);const aa=p[p[X]+Y],ab=p[p[X]+Y+1],ba=p[p[X+1]+Y],bb=p[p[X+1]+Y+1];return lerp(lerp(this.g2(aa,xf,yf),this.g2(ba,xf-1,yf),u),lerp(this.g2(ab,xf,yf-1),this.g2(bb,xf-1,yf-1),u),v)*.75;}
-  fbm2(x,y,oct){let sum=0,amp=1,freq=1,n=0;for(let i=0;i<oct;i++){sum+=this.n2(x*freq,y*freq)*amp;n+=amp;amp*=.5;freq*=2;}return sum/n;}
+function mapTileKey(source,step,tx,tz){ const revision=source==='server'?mapWorldRevision:0; return `${source}:${revision}:${SEED}:${step}:${tx}:${tz}`; }
+function rememberMapTile(tile,target='mini'){
+  const cache=mapTileCaches[target]||mapTileCaches.mini,key=tile.key||mapTileKey(tile.source||'local',tile.step,tile.tx,tile.tz,tile.version);
+  tile.key=key; cache.delete(key); cache.set(key,tile);
+  while(cache.size>MAP_TILE_CACHE_LIMIT)cache.delete(cache.keys().next().value);
+  return tile;
 }
-let cacheSeed=null,noiseA,noiseB,noiseC;
-const tileCaches={mini:new Map(),full:new Map()};
-function prepareSeed(seed){if(cacheSeed===seed)return;if(cacheSeed!==null){tileCaches.mini.clear();tileCaches.full.clear();}cacheSeed=seed;noiseA=new Noise(seed);noiseB=new Noise(seed+7919);noiseC=new Noise(seed+104729);}
-function sampleColumn(x,z){
-  const cont=noiseA.fbm2(x*.0015,z*.0015,4),hills=noiseA.fbm2(x*.011+13.3,z*.011-7.7,3),mRaw=noiseB.fbm2(x*.0008+310.5,z*.0008-95.2,2),mMask=smoothstep(.06,.56,mRaw),r=noiseB.fbm2(x*.0055-42.1,z*.0055+88.4,3),ridge=1-Math.abs(r),riverNoise=Math.abs(noiseB.fbm2(x*.0024+140.2,z*.0024-260.8,3)),river=1-smoothstep(.025,.105,riverNoise);
-  let h=SEA+3+cont*10+hills*4.5+mMask*(ridge*ridge*46);if(h<SEA+24)h-=river*9;h=clamp(Math.floor(h),4,H-4);
-  const temp=noiseC.fbm2(x*.0006+900.5,z*.0006+300.1,2)-(h-SEA)*.010,humid=noiseC.fbm2(x*.0007-400.2,z*.0007+700.9,2);let biome;
-  if(h<=SEA+1&&river>.35)biome='river';else if(h>SEA+36)biome='mountains';else if(temp>.22&&humid<.06)biome='desert';else if(temp<-.30)biome='snowy';else if(humid>.17)biome='forest';else biome='plains';
-  return{h,biome};
+function findMapTile(target,step,tx,tz){
+  const cache=mapTileCaches[target]||mapTileCaches.mini,server=cache.get(mapTileKey('server',step,tx,tz)),local=cache.get(mapTileKey('local',step,tx,tz));
+  if(server){cache.delete(server.key);cache.set(server.key,server);return server;}
+  if(local){cache.delete(local.key);cache.set(local.key,local);return local;}
+  return null;
 }
-function biomeCode(name){return name==='forest'?1:name==='desert'?2:name==='snowy'?3:name==='mountains'?4:name==='river'?5:0;}
-function baseSurface(x,z,m){const c=sampleColumn(x,z),h=c.h;let id=m.grass;if(h<SEA)id=m.water;else if(h<=SEA+1)id=(c.biome==='desert'||c.biome==='river')?m.sand:m.water;else if(c.biome==='desert')id=m.sand;else if(c.biome==='snowy')id=m.snow;else if(c.biome==='mountains')id=h>SEA+48?m.snow:m.stone;return{y:h,id,biome:biomeCode(c.biome)};}
-function tileKey(step,tx,tz){return step+'|'+tx+'|'+tz;}
-function getTile(target,step,tx,tz,m){
-  const cache=target==='full'?tileCaches.full:tileCaches.mini,key=tileKey(step,tx,tz),old=cache.get(key);if(old){cache.delete(key);cache.set(key,old);return old;}
-  const ids=new Uint16Array(TILE_PIXELS*TILE_PIXELS),heights=new Int16Array(TILE_PIXELS*TILE_PIXELS),biomes=new Uint8Array(TILE_PIXELS*TILE_PIXELS),worldSize=TILE_PIXELS*step,originX=tx*worldSize,originZ=tz*worldSize;
-  for(let pz=0;pz<TILE_PIXELS;pz++)for(let px=0;px<TILE_PIXELS;px++){const c=baseSurface(originX+px*step,originZ+pz*step,m),i=pz*TILE_PIXELS+px;ids[i]=c.id;heights[i]=c.y;biomes[i]=c.biome;}
-  const tile={ids,heights,biomes};cache.set(key,tile);if(cache.size>384)cache.delete(cache.keys().next().value);return tile;
-}
-function makeEdits(list){const out=Object.create(null);for(const e of(list||[])){const k=e[0]+','+e[2];(out[k]||(out[k]=Object.create(null)))[e[1]]=e[3];}return out;}
-function resolveColumn(x,z,base,memo,edits,m){
-  const k=x+','+z,existing=memo[k];if(existing)return existing;const rows=edits[k];let result=base;
-  if(rows){let highest=-1,highestId=AIR;for(const ys in rows){const y=Number(ys),id=rows[ys];if(id!==AIR&&y>highest){highest=y;highestId=id;}}
-    if(highest>=base.y)result={y:highest,id:highestId};
-    else if(Object.prototype.hasOwnProperty.call(rows,String(base.y))&&rows[base.y]===AIR)result={y:Math.max(0,base.y-1),id:base.id};
-  }
-  memo[k]=result;return result;
-}
-function rgbFor(id,palette,m){const c=palette[id];if(c)return c;if(id===m.water)return[55,125,215];if(id===m.lava)return[225,83,22];return[38,48,58];}
-function paintMapPixel(pixels,grid,gx,gz,r,g,b,alpha=1){
-  if(gx<0||gz<0||gx>=grid||gz>=grid)return;
-  const p=(gz*grid+gx)*4;if(alpha>=1){pixels[p]=r;pixels[p+1]=g;pixels[p+2]=b;pixels[p+3]=255;return;}
-  pixels[p]=pixels[p]*(1-alpha)+r*alpha;pixels[p+1]=pixels[p+1]*(1-alpha)+g*alpha;pixels[p+2]=pixels[p+2]*(1-alpha)+b*alpha;pixels[p+3]=255;
-}
-function paintMapTree(pixels,grid,gx,gz,step,seed){
-  const radius=step>=4?1:step>=2?2:2;
-  // Soft ground shadow first, as it would appear from a high overhead camera.
-  for(let dz=-radius+2;dz<=radius+3;dz++)for(let dx=-radius+2;dx<=radius+3;dx++){
-    const distance=(dx-1)*(dx-1)+(dz-1)*(dz-1);if(distance>radius*radius+3)continue;
-    paintMapPixel(pixels,grid,gx+dx,gz+dz,22,43,28,.38);
-  }
-  for(let dz=-radius;dz<=radius;dz++)for(let dx=-radius;dx<=radius;dx++){
-    const distance=dx*dx+dz*dz;if(distance>radius*radius+1)continue;
-    const highlight=dx<0&&dz<0;
-    paintMapPixel(pixels,grid,gx+dx,gz+dz,highlight?82:38,highlight?143:98,highlight?56:48,.94);
-  }
-  if(step<=2) paintMapPixel(pixels,grid,gx,gz,111,76,42,1);
-  paintMapPixel(pixels,grid,gx-1,gz-1,105,165,67,1);
-  paintMapPixel(pixels,grid,gx+1,gz,29,77,40,.92);
-}
-function paintMapBrush(pixels,grid,gx,gz,step){
-  paintMapPixel(pixels,grid,gx,gz,69,127,53,.88);
-  if(step<=2) paintMapPixel(pixels,grid,gx+1,gz-1,102,156,64,.9);
-}
-function collectCabinMarkers(baseX,baseZ,radius){
-  const minCX=Math.floor(baseX/CS)-1,maxCX=Math.ceil((baseX+radius*2)/CS)+1,minCZ=Math.floor(baseZ/CS)-1,maxCZ=Math.ceil((baseZ+radius*2)/CS)+1,markers=[];
-  for(let cz=minCZ;cz<=maxCZ;cz++)for(let cx=minCX;cx<=maxCX;cx++){
-    const showcase=cx===0&&cz===0,chance=h2(cx,cz,901);if(!showcase&&chance>=.035)continue;
-    const anchor=sampleColumn(cx*CS+7,cz*CS+6);if(!(showcase||(anchor.biome==='plains'||anchor.biome==='forest')&&anchor.h>SEA+1&&anchor.h<H-9))continue;
-    let minH=H,maxH=0;for(let lz=3;lz<12;lz++)for(let lx=3;lx<13;lx++){const h=sampleColumn(cx*CS+lx,cz*CS+lz).h;minH=Math.min(minH,h);maxH=Math.max(maxH,h);}if(showcase||maxH-minH<=3)markers.push({type:'cabin',x:cx*CS+7.5,z:cz*CS+7.5});
-  }
-  return markers;
-}
-function compileAerialShader(gl){
-  const vertexSource='attribute vec3 a_position;attribute vec3 a_color;varying vec3 v_color;void main(){gl_Position=vec4(a_position,1.0);v_color=a_color;}',fragmentSource='precision mediump float;varying vec3 v_color;void main(){gl_FragColor=vec4(v_color,1.0);}';
-  const compile=(type,source)=>{const shader=gl.createShader(type);gl.shaderSource(shader,source);gl.compileShader(shader);if(!gl.getShaderParameter(shader,gl.COMPILE_STATUS)){gl.deleteShader(shader);return null;}return shader;};
-  const vertex=compile(gl.VERTEX_SHADER,vertexSource),fragment=compile(gl.FRAGMENT_SHADER,fragmentSource);if(!vertex||!fragment)return null;
-  const program=gl.createProgram();gl.attachShader(program,vertex);gl.attachShader(program,fragment);gl.linkProgram(program);if(!gl.getProgramParameter(program,gl.LINK_STATUS))return null;
-  program.position=gl.getAttribLocation(program,'a_position');program.color=gl.getAttribLocation(program,'a_color');return program;
-}
-function aerialProject(x,z,y,cx,cz,halfSpan){return[((x-cx)/halfSpan),((cz-z)/halfSpan)-(y-SEA)*.006];}
-function aerialPush(data,x,y,z,r,g,b){data.push(x,y,z,r/255,g/255,b/255);}
-function aerialTri(data,a,b,c,color){aerialPush(data,a[0],a[1],a[2],color[0],color[1],color[2]);aerialPush(data,b[0],b[1],b[2],color[0],color[1],color[2]);aerialPush(data,c[0],c[1],c[2],color[0],color[1],color[2]);}
-function aerialQuad(data,a,b,c,d,color){aerialTri(data,a,b,c,color);aerialTri(data,a,c,d,color);}
-function drawAerialBatch(gl,program,data){if(!data.length)return;const buffer=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,buffer);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(data),gl.STREAM_DRAW);gl.enableVertexAttribArray(program.position);gl.enableVertexAttribArray(program.color);gl.vertexAttribPointer(program.position,3,gl.FLOAT,false,24,0);gl.vertexAttribPointer(program.color,3,gl.FLOAT,false,24,12);gl.drawArrays(gl.TRIANGLES,0,data.length/6);gl.deleteBuffer(buffer);}
-let aerialGLState=null;
-function renderAerialWebGL(d,ids,heights,biomes,grid,baseX,baseZ,step,palette,m,cabinMarkers){
-  if(typeof OffscreenCanvas!=='function')return null;
-  try{
-    if(!aerialGLState||aerialGLState.grid!==grid){const canvas=new OffscreenCanvas(grid,grid),gl=canvas.getContext('webgl',{alpha:false,antialias:false,preserveDrawingBuffer:false});if(!gl)return null;const program=compileAerialShader(gl);if(!program)return null;aerialGLState={grid,canvas,gl,program};}
-    const state=aerialGLState,gl=state.gl,program=state.program,centerX=baseX+(grid-1)*step*.5,centerZ=baseZ+(grid-1)*step*.5,halfSpan=Math.max(1,(grid-1)*step*.5);
-    gl.viewport(0,0,grid,grid);gl.disable(gl.DEPTH_TEST);gl.disable(gl.CULL_FACE);gl.clearColor(.045,.065,.085,1);gl.clear(gl.COLOR_BUFFER_BIT);gl.useProgram(program);
-    const terrain=new Float32Array(grid*grid*6);
-    for(let gz=0;gz<grid;gz++)for(let gx=0;gx<grid;gx++){const i=gz*grid+gx,x=baseX+gx*step,z=baseZ+gz*step,p=aerialProject(x,z,heights[i],centerX,centerZ,halfSpan),rgb=palette[ids[i]]||[48,58,68],grain=(h2(x,z,d.seed+305)-.5)*(ids[i]===m.water?4:10),o=i*6;terrain[o]=p[0];terrain[o+1]=p[1];terrain[o+2]=0;terrain[o+3]=clamp((rgb[0]+grain)*(.88+(heights[i]-SEA)*.006),0,255)/255;terrain[o+4]=clamp((rgb[1]+grain)*(.88+(heights[i]-SEA)*.006),0,255)/255;terrain[o+5]=clamp((rgb[2]+grain)*(.88+(heights[i]-SEA)*.006),0,255)/255;}
-    const terrainBuffer=gl.createBuffer(),indexBuffer=gl.createBuffer(),indices=new Uint16Array((grid-1)*(grid-1)*6);let ii=0;for(let gz=0;gz<grid-1;gz++)for(let gx=0;gx<grid-1;gx++){const a=gz*grid+gx,b=a+1,c=a+grid,d=c+1;indices[ii++]=a;indices[ii++]=c;indices[ii++]=b;indices[ii++]=b;indices[ii++]=c;indices[ii++]=d;}
-    gl.bindBuffer(gl.ARRAY_BUFFER,terrainBuffer);gl.bufferData(gl.ARRAY_BUFFER,terrain,gl.STREAM_DRAW);gl.enableVertexAttribArray(program.position);gl.enableVertexAttribArray(program.color);gl.vertexAttribPointer(program.position,3,gl.FLOAT,false,24,0);gl.vertexAttribPointer(program.color,3,gl.FLOAT,false,24,12);gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,indexBuffer);gl.bufferData(gl.ELEMENT_ARRAY_BUFFER,indices,gl.STREAM_DRAW);gl.drawElements(gl.TRIANGLES,indices.length,gl.UNSIGNED_SHORT,0);gl.deleteBuffer(terrainBuffer);gl.deleteBuffer(indexBuffer);
-    const objects=[],treeStride=Math.max(3,Math.round(5/step));
-    for(let gz=2;gz<grid-2;gz+=treeStride)for(let gx=2;gx<grid-2;gx+=treeStride){const i=gz*grid+gx,biome=biomes[i],y=heights[i],x=baseX+gx*step,z=baseZ+gz*step,chance=h3(x,0,z,11);if(y<=SEA+1||ids[i]===m.water||ids[i]===m.lava)continue;const center=aerialProject(x,z,y,centerX,centerZ,halfSpan),radius=(step>=4?.018:step>=2?.027:.035),shadow=aerialProject(x+step*1.3,z+step*1.6,y+.2,centerX,centerZ,halfSpan);if((biome===1&&chance<.055)||(biome===3&&chance<.030)||(biome===0&&chance<.010)){aerialQuad(objects,[shadow[0]-radius,shadow[1]-radius*.45,.02],[shadow[0]+radius,shadow[1]-radius*.45,.02],[shadow[0]+radius,shadow[1]+radius*.45,.02],[shadow[0]-radius,shadow[1]+radius*.45,.02],[24,42,28]);const crown=biome===3?[68,104,116]:[42,112,56],light=[93,151,67];aerialTri(objects,[center[0],center[1]+radius*1.2,.01],[center[0]-radius,center[1]-radius*.4,.01],[center[0]+radius,center[1]-radius*.4,.01],crown);aerialTri(objects,[center[0],center[1]+radius*1.2,.005],[center[0]-radius,center[1]-radius*.4,.005],[center[0],center[1],.005],light);aerialQuad(objects,[center[0]-radius*.16,center[1]-radius*.16,.0],[center[0]+radius*.16,center[1]-radius*.16,.0],[center[0]+radius*.16,center[1]+radius*.35,.0],[center[0]-radius*.16,center[1]+radius*.35,.0],[112,76,42]);}else if(biome===1&&chance<.19){aerialQuad(objects,[center[0]-.016,center[1]-.010,.01],[center[0]+.016,center[1]-.010,.01],[center[0]+.020,center[1]+.015,.01],[center[0]-.020,center[1]+.015,.01],[69,127,53]);}}
-    for(const marker of cabinMarkers){const x=marker.x,z=marker.z,y=sampleColumn(x,z).h,p=aerialProject(x,z,y,centerX,centerZ,halfSpan),w=Math.max(.035,8/halfSpan),h=Math.max(.030,7/halfSpan),shadow=aerialProject(x+step*1.4,z+step*1.6,y+.1,centerX,centerZ,halfSpan);aerialQuad(objects,[shadow[0]-w*.6,shadow[1]-h*.45,.02],[shadow[0]+w*.6,shadow[1]-h*.45,.02],[shadow[0]+w*.6,shadow[1]+h*.45,.02],[shadow[0]-w*.6,shadow[1]+h*.45,.02],[48,39,30]);aerialQuad(objects,[p[0]-w/2,p[1]-h/2,.0],[p[0]+w/2,p[1]-h/2,.0],[p[0]+w/2,p[1]+h/2,.0],[p[0]-w/2,p[1]+h/2,.0],[132,85,48]);aerialTri(objects,[p[0],p[1]+h*.8,.0],[p[0]-w*.65,p[1]+h*.15,.0],[p[0]+w*.65,p[1]+h*.15,.0],[197,137,70]);}
-    drawAerialBatch(gl,program,objects);return state.canvas.transferToImageBitmap();
-  }catch(error){return null;}
-}
-let activeRequest=0;
-onmessage=e=>{
-  const d=e.data||{};if(d.type!=='render')return;const requestId=d.id;activeRequest=requestId;prepareSeed(d.seed|0);
-  const step=Math.max(1,d.step|0),grid=d.grid|0,baseX=d.baseX|0,baseZ=d.baseZ|0,m=d.materials||{},palette=d.palette||[],edits=makeEdits(d.edits),memo=Object.create(null),count=grid*grid;
-  const ids=new Uint16Array(count),heights=new Int16Array(count),biomes=new Uint8Array(count),tileWorld=step*TILE_PIXELS;
-  for(let gz=0;gz<grid;gz++)for(let gx=0;gx<grid;gx++){const wx=baseX+gx*step,wz=baseZ+gz*step,tx=Math.floor(wx/tileWorld),tz=Math.floor(wz/tileWorld),tile=getTile(d.target,step,tx,tz,m),px=Math.floor((((wx%tileWorld)+tileWorld)%tileWorld)/step),pz=Math.floor((((wz%tileWorld)+tileWorld)%tileWorld)/step),ti=pz*TILE_PIXELS+px,ci=gz*grid+gx,c=resolveColumn(wx,wz,{y:tile.heights[ti],id:tile.ids[ti]},memo,edits,m);ids[ci]=c.id;heights[ci]=c.y;biomes[ci]=tile.biomes[ti];}
-  const cabinMarkers=collectCabinMarkers(baseX,baseZ,d.snapshotRadius),aerialBitmap=renderAerialWebGL(d,ids,heights,biomes,grid,baseX,baseZ,step,palette,m,cabinMarkers);
-  if(aerialBitmap){if(activeRequest!==requestId)return;postMessage({type:'complete',id:requestId,target:d.target,version:d.version,baseX,baseZ,radius:d.snapshotRadius,step,grid,markers:cabinMarkers,bitmap:aerialBitmap},[aerialBitmap]);return;}
-  const pixels=new Uint8ClampedArray(count*4);
-  for(let gz=0;gz<grid;gz++)for(let gx=0;gx<grid;gx++){const i=gz*grid+gx,cid=ids[i],y=heights[i],west=heights[gz*grid+Math.max(0,gx-1)],east=heights[gz*grid+Math.min(grid-1,gx+1)],north=heights[Math.max(0,gz-1)*grid+gx],south=heights[Math.min(grid-1,gz+1)*grid+gx],relief=(west-east+north-south)*.018,light=clamp(.84+(y-SEA)*.009+relief,.40,1.24),rgb=rgbFor(cid,palette,m),grain=(h2(baseX+gx*step,baseZ+gz*step,d.seed+305)-.5)*(cid===m.water?5:12),p=i*4;pixels[p]=clamp((rgb[0]+grain)*light,0,255)|0;pixels[p+1]=clamp((rgb[1]+grain)*light,0,255)|0;pixels[p+2]=clamp((rgb[2]+grain)*light,0,255)|0;pixels[p+3]=255;}
-  // Satellite-camera pass: add the same deterministic vegetation density used
-  // by the world generator, with ground shadows and crown highlights. It is
-  // intentionally done after hillshade and remains entirely inside the Worker.
-  const treeStride=Math.max(3,Math.round(5/step));
-  for(let gz=2;gz<grid-2;gz+=treeStride)for(let gx=2;gx<grid-2;gx+=treeStride){
-    const i=gz*grid+gx,biome=biomes[i],y=heights[i],worldX=baseX+gx*step,worldZ=baseZ+gz*step,chance=h3(worldX,0,worldZ,11);
-    if(y<=SEA+1||ids[i]===m.water||ids[i]===m.lava)continue;
-    if(biome===1&&chance<.055)paintMapTree(pixels,grid,gx,gz,step,d.seed+702);
-    else if(biome===3&&chance<.030)paintMapTree(pixels,grid,gx,gz,step,d.seed+703);
-    else if(biome===0&&chance<.010)paintMapTree(pixels,grid,gx,gz,step,d.seed+702);
-    else if(biome===1&&chance<.19)paintMapBrush(pixels,grid,gx,gz,step);
-    else if(biome===2&&chance<.006)paintMapBrush(pixels,grid,gx,gz,step);
-  }
-  // Top-down structures: roofs and paths make the map read like a real aerial
-  // capture instead of a plain height-colored image.
-  for(const marker of cabinMarkers){
-    const cx=Math.round((marker.x-baseX)/step),cz=Math.round((marker.z-baseZ)/step);
-    const roofW=Math.max(2,Math.round(8/step)),roofD=Math.max(2,Math.round(7/step));
-    for(let dz=-Math.floor(roofD/2);dz<=Math.ceil(roofD/2);dz++)for(let dx=-Math.floor(roofW/2);dx<=Math.ceil(roofW/2);dx++)paintMapPixel(pixels,grid,cx+dx,cz+dz,126,82,48,.96);
-    paintMapPixel(pixels,grid,cx,cz,197,137,70,1);
-    for(let n=1;n<=Math.max(1,Math.round(10/step));n++){paintMapPixel(pixels,grid,cx+Math.round(n*.9),cz+Math.round(4/step),184,148,89,.82);paintMapPixel(pixels,grid,cx-Math.round(n*.9),cz-Math.round(4/step),184,148,89,.82);}
-  }
-  if(activeRequest!==requestId)return;
-  try{
-    if(typeof OffscreenCanvas==='function'&&typeof ImageData==='function'){
-      const offscreen=new OffscreenCanvas(grid,grid),offscreenCtx=offscreen.getContext('2d');offscreenCtx.putImageData(new ImageData(pixels,grid,grid),0,0);const bitmap=offscreen.transferToImageBitmap();postMessage({type:'complete',id:requestId,target:d.target,version:d.version,baseX,baseZ,radius:d.snapshotRadius,step,grid,markers:cabinMarkers,bitmap},[bitmap]);return;
-    }
-  }catch(error){}
-  postMessage({type:'complete',id:requestId,target:d.target,version:d.version,baseX,baseZ,radius:d.snapshotRadius,step,grid,markers:cabinMarkers,buffer:pixels.buffer},[pixels.buffer]);
-};
-`;
-let mapWorker=null,mapWorkerUrl='',mapWorkerPending=new Map(),mapWorkerRequestId=0;
-function collectMapWorkerEdits(baseX,baseZ,snapshotRadius){
-  const minX=baseX-1,minZ=baseZ-1,maxX=baseX+snapshotRadius*2+2,maxZ=baseZ+snapshotRadius*2+2,out=[];
-  overrides.forEach((edits,key)=>{const parts=key.split(','),cx=Number(parts[0]),cz=Number(parts[1]);edits.forEach((id,index)=>{const x=cx*CS+(index&15),z=cz*CS+((index>>4)&15),y=index>>8;if(x>=minX&&x<=maxX&&z>=minZ&&z<=maxZ)out.push([x,y,z,id]);});});
+function mapTileCoords(radius,step,centerX,centerZ){
+  const span=MAP_TILE_SIZE*step,minTX=Math.floor((centerX-radius)/span),maxTX=Math.floor((centerX+radius)/span),minTZ=Math.floor((centerZ-radius)/span),maxTZ=Math.floor((centerZ+radius)/span),out=[];
+  for(let tz=minTZ;tz<=maxTZ;tz++) for(let tx=minTX;tx<=maxTX&&out.length<49;tx++) out.push({tx,tz});
   return out;
 }
+function mapRequestKey(target,step,radius,centerX,centerZ){
+  const span=MAP_TILE_SIZE*step;
+  return `${target}:${mapDataVersion}:${step}:${Math.floor(centerX/span)}:${Math.floor(centerZ/span)}:${Math.ceil(radius/span)}`;
+}
+const localMapMarkerCache=new Map();
+function collectLocalMapMarkers(coords,step){
+  const minTX=Math.min(...coords.map(t=>t.tx)),maxTX=Math.max(...coords.map(t=>t.tx)),minTZ=Math.min(...coords.map(t=>t.tz)),maxTZ=Math.max(...coords.map(t=>t.tz)),key=`${mapDataVersion}:${SEED}:${step}:${minTX}:${maxTX}:${minTZ}:${maxTZ}`,cached=localMapMarkerCache.get(key);
+  if(cached)return cached;
+  const minX=minTX*MAP_TILE_SIZE*step,maxX=(maxTX+1)*MAP_TILE_SIZE*step,minZ=minTZ*MAP_TILE_SIZE*step,maxZ=(maxTZ+1)*MAP_TILE_SIZE*step,markers=[];
+  const minCX=Math.floor(minX/CS)-1,maxCX=Math.ceil(maxX/CS)+1,minCZ=Math.floor(minZ/CS)-1,maxCZ=Math.ceil(maxZ/CS)+1;
+  for(let cz=minCZ;cz<=maxCZ;cz++)for(let cx=minCX;cx<=maxCX;cx++){
+    const showcase=cx===0&&cz===0;if(!showcase&&h2(cx,cz,901)>=.035)continue;
+    const anchor=sampleColumn(cx*CS+7,cz*CS+6);if(!(showcase||(anchor.biome==='plains'||anchor.biome==='forest')&&anchor.h>SEA+1&&anchor.h<H-9))continue;
+    let minH=H,maxH=0;for(let lz=3;lz<12;lz++)for(let lx=3;lx<13;lx++){const h=sampleColumn(cx*CS+lx,cz*CS+lz).h;minH=Math.min(minH,h);maxH=Math.max(maxH,h);}
+    if(showcase||maxH-minH<=3){const x=cx*CS+7.5,z=cz*CS+7.5;if(x>=minX&&x<maxX&&z>=minZ&&z<maxZ)markers.push({type:'cabin',x,z});}
+  }
+  localMapMarkerCache.set(key,markers);if(localMapMarkerCache.size>32)localMapMarkerCache.delete(localMapMarkerCache.keys().next().value);return markers;
+}
+function collectMapWorkerEdits(minX,minZ,maxX,maxZ){
+  const out=[];
+  overrides.forEach((edits,key)=>{
+    const parts=key.split(','),cx=Number(parts[0]),cz=Number(parts[1]);
+    edits.forEach((id,index)=>{const x=cx*CS+(index&15),z=cz*CS+((index>>4)&15),y=index>>8;if(x>=minX&&x<=maxX&&z>=minZ&&z<=maxZ)out.push([x,y,z,id]);});
+  });
+  return out;
+}
+function mapWorkerPalette(){
+  const palette=[];
+  for(let i=0;i<BLOCKS.length;i++) palette[i]=mapTopColor(i).slice(0,3);
+  return palette;
+}
+const mapWorkerSource=String.raw`
+const CS=16,H=80,SEA=30,TILE=64,AIR=0;
+const clamp=(v,a,b)=>v<a?a:v>b?b:v;
+const indexOf=(r,g,b)=>((r>=192?3:r>=128?2:r>=64?1:0)<<4)|((g>=192?3:g>=128?2:g>=64?1:0)<<2)|(b>=192?3:b>=128?2:b>=64?1:0);
+const lerp=(a,b,t)=>a+(b-a)*t;
+function h3(x,y,z,seed){let h=Math.imul(x,0x27d4eb2d)^Math.imul(y,0x165667b1)^Math.imul(z,0x9e3779b1)^Math.imul(seed|0,0x85ebca6b);h^=h>>>15;h=Math.imul(h,0x2c1b3c6d);h^=h>>>12;h=Math.imul(h,0x297a2d39);h^=h>>>15;return(h>>>0)/4294967296;}
+const smoothstep=(a,b,x)=>{const t=clamp((x-a)/(b-a),0,1);return t*t*(3-2*t);};
+function h2(x,y,seed){let h=Math.imul(x,0x27d4eb2d)^Math.imul(y,0x165667b1)^Math.imul(seed,0x9e3779b1);h^=h>>>15;h=Math.imul(h,0x85ebca6b);h^=h>>>13;h=Math.imul(h,0xc2b2ae35);h^=h>>>16;return(h>>>0)/4294967296;}
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};}
+class Noise{
+ constructor(seed){const p=new Uint8Array(256);for(let i=0;i<256;i++)p[i]=i;const r=mulberry32(seed>>>0);for(let i=255;i>0;i--){const j=(r()*(i+1))|0,t=p[i];p[i]=p[j];p[j]=t;}this.p=new Uint8Array(512);for(let i=0;i<512;i++)this.p[i]=p[i&255];}
+ fade(t){return t*t*t*(t*(t*6-15)+10);}
+ g(h,x,y){return((h&1)?-x:x)+((h&2)?-y:y);}
+ n(x,y){const fx=Math.floor(x),fy=Math.floor(y),X=fx&255,Y=fy&255,xf=x-fx,yf=y-fy,p=this.p,u=this.fade(xf),v=this.fade(yf),aa=p[p[X]+Y],ab=p[p[X]+Y+1],ba=p[p[X+1]+Y],bb=p[p[X+1]+Y+1];return lerp(lerp(this.g(aa,xf,yf),this.g(ba,xf-1,yf),u),lerp(this.g(ab,xf,yf-1),this.g(bb,xf-1,yf-1),u),v)*.75;}
+ fbm(x,y,o){let s=0,a=1,f=1,n=0;for(let i=0;i<o;i++){s+=this.n(x*f,y*f)*a;n+=a;a*=.5;f*=2;}return s/n;}
+}
+let noiseA,noiseB,noiseC,seedSet=null;
+function setSeed(seed){if(seedSet===seed)return;seedSet=seed;noiseA=new Noise(seed);noiseB=new Noise(seed+7919);noiseC=new Noise(seed+104729);}
+function column(x,z,m){const cont=noiseA.fbm(x*.0015,z*.0015,4),hills=noiseA.fbm(x*.011+13.3,z*.011-7.7,3),mr=noiseB.fbm(x*.0008+310.5,z*.0008-95.2,2),mm=smoothstep(.06,.56,mr),r=noiseB.fbm(x*.0055-42.1,z*.0055+88.4,3),ridge=1-Math.abs(r),rn=Math.abs(noiseB.fbm(x*.0024+140.2,z*.0024-260.8,3)),river=1-smoothstep(.025,.105,rn);let h=SEA+3+cont*10+hills*4.5+mm*ridge*ridge*46;if(h<SEA+24)h-=river*9;h=clamp(Math.floor(h),4,H-4);const temp=noiseC.fbm(x*.0006+900.5,z*.0006+300.1,2)-(h-SEA)*.010,humid=noiseC.fbm(x*.0007-400.2,z*.0007+700.9,2);let biome;if(h<=SEA+1&&river>.35)biome=5;else if(h>SEA+36)biome=4;else if(temp>.22&&humid<.06)biome=2;else if(temp<-.30)biome=3;else if(humid>.17)biome=1;else biome=0;let id=m.grass;if(h<SEA)id=m.water;else if(h<=SEA+1)id=(biome===2||biome===5)?m.sand:m.water;else if(biome===2)id=m.sand;else if(biome===3)id=m.snow;else if(biome===4)id=h>SEA+48?m.snow:m.stone;return{y:h,id,biome};}
+function editsMap(list){const out=Object.create(null);for(const e of(list||[])){const k=e[0]+','+e[2];(out[k]||(out[k]=Object.create(null)))[e[1]]=e[3];}return out;}
+function resolve(x,z,edits,m){const base=column(x,z,m),rows=edits[x+','+z];if(!rows)return base;let top=-1,id=0;for(const ys in rows){const y=Number(ys),v=Number(rows[ys]);if(v!==AIR&&y>top){top=y;id=v;}}if(top>=base.y)return{y:top,id,biome:base.biome};if(Object.prototype.hasOwnProperty.call(rows,String(base.y))&&Number(rows[base.y])===AIR)return{y:Math.max(0,base.y-1),id:base.id,biome:base.biome};return base;}
+function color(id,biome,y,palette,m){let c=palette[id];if(!c)c=id===m.water?[55,125,215]:id===m.lava?[225,83,22]:biome===2?[221,208,160]:biome===3?[247,251,255]:biome===4?[128,129,132]:biome===1?[58,112,44]:[104,166,64];const light=clamp(.84+(y-SEA)*.009,.40,1.24);return[c[0]*light|0,c[1]*light|0,c[2]*light|0];}
+function renderTile(d,tx,tz,step,edits,m){const pgrid=TILE+2,worldSize=TILE*step,ox=tx*worldSize,oz=tz*worldSize,cols=new Array(pgrid*pgrid);for(let z=-1;z<=TILE;z++)for(let x=-1;x<=TILE;x++)cols[(z+1)*pgrid+x+1]=resolve(ox+x*step,oz+z*step,edits,m);const rgbPixels=new Uint8Array(TILE*TILE*3);for(let z=0;z<TILE;z++)for(let x=0;x<TILE;x++){const i=(z+1)*pgrid+x+1,c=cols[i],w=cols[i-1],e=cols[i+1],n=cols[i-pgrid],s=cols[i+pgrid],relief=((w.y-e.y)+(n.y-s.y))*.018,base=color(c.id,c.biome,c.y,d.palette,m),light=clamp(1+relief,.75,1.16),p=(z*TILE+x)*3;rgbPixels[p]=clamp(base[0]*light,0,255);rgbPixels[p+1]=clamp(base[1]*light,0,255);rgbPixels[p+2]=clamp(base[2]*light,0,255);const density=c.biome===1?.055:c.biome===3?.030:c.biome===0?.010:.004;if(c.y>SEA+1&&c.id!==m.water&&c.id!==m.lava&&h3(ox+x*step,0,oz+z*step,11)<density){rgbPixels[p]=rgbPixels[p]*.42+(c.biome===3?68:42)*.58;rgbPixels[p+1]=rgbPixels[p+1]*.42+(c.biome===3?104:112)*.58;rgbPixels[p+2]=rgbPixels[p+2]*.42+(c.biome===3?116:56)*.58;}}const indices=new Uint8Array(TILE*TILE);for(let i=0;i<indices.length;i++)indices[i]=indexOf(rgbPixels[i*3],rgbPixels[i*3+1],rgbPixels[i*3+2]);return{tx,tz,step,size:TILE,buffer:indices.buffer};}
+onmessage=e=>{const d=e.data||{};if(d.type!=='renderTiles')return;setSeed(d.seed);const edits=editsMap(d.edits),out=[],transfer=[],m=d.materials;for(const t of(d.tiles||[])){const tile=renderTile(d,t.tx,t.tz,d.step,edits,m);out.push(tile);transfer.push(tile.buffer);}postMessage({type:'tiles',id:d.id,version:d.version,tiles:out},transfer);};
+`;
 function initMapWorker(){
-  if(typeof Worker!=='function'||typeof Blob!=='function')return;
+  if(typeof Worker!=='function'||typeof Blob!=='function') return;
   try{
     mapWorkerUrl=URL.createObjectURL(new Blob([mapWorkerSource],{type:'text/javascript'}));
     mapWorker=new Worker(mapWorkerUrl);
     mapWorker.onmessage=e=>{
-      const d=e.data||{},pending=mapWorkerPending.get(d.id);if(d.type!=='complete'||!pending){return;}
-      mapWorkerPending.delete(d.id);if(d.version!==mapDataVersion)return;
-      const current=d.target==='full'?fullMapSnapshot:mapSnapshot;
-      // A Server raster is authoritative for the exact request that produced
-      // it. A Worker frame may finish later, so never let that stale local
-      // frame overwrite the already accepted Server frame.
-      if(!serverMapFailed&&current?.server&&current.requestKey===pending.key&&serverSnapshotKey[d.target]===pending.key)return;
-      const grid=Number(d.grid),raster=document.createElement('canvas');raster.width=raster.height=grid;
-      const ctx=raster.getContext('2d');
-      if(d.bitmap){ctx.drawImage(d.bitmap,0,0);d.bitmap.close?.();}
-      else {const pixels=new Uint8ClampedArray(d.buffer),image=ctx.createImageData(grid,grid);image.data.set(pixels);ctx.putImageData(image,0,0);}
-      const snapshot={canvas:raster,baseX:Number(d.baseX),baseZ:Number(d.baseZ),radius:Number(d.radius),step:Number(d.step),grid,centerX:Number(d.baseX)+Number(d.radius),centerZ:Number(d.baseZ)+Number(d.radius),server:false,requestKey:pending.key,markers:(Array.isArray(mapServerMarkers[d.target])&&mapServerMarkers[d.target].length)?mapServerMarkers[d.target]:(Array.isArray(d.markers)?d.markers:[])};
-      if(d.target==='full'){fullMapSnapshot=snapshot;fullMapSnapshotDirty=false;}else{mapSnapshot=snapshot;mapSnapshotDirty=false;}
-      if(d.target==='full'&&mapOverlay.classList.contains('show'))redrawFullMap();
+      const d=e.data||{},job=mapWorkerPending.get(d.id);
+      if(d.type!=='tiles'||!job){return;}
+      mapWorkerPending.delete(d.id);
+      if(d.version!==mapDataVersion) return;
+      for(const raw of(Array.isArray(d.tiles)?d.tiles:[])){
+        const buffer=raw.buffer instanceof ArrayBuffer?new Uint8Array(raw.buffer):new Uint8Array(0);
+        if(buffer.length!==MAP_TILE_SIZE*MAP_TILE_SIZE) continue;
+        rememberMapTile({source:'local',version:mapDataVersion,tx:Number(raw.tx),tz:Number(raw.tz),step:Number(raw.step),size:MAP_TILE_SIZE,indices:buffer,markers:[]},job.target);
+      }
+      if(mapTileJobs[job.target]!==job)return;
+      mapTileJobs[job.target]=null;
+      composeMapSnapshot(job.target,job.coords,job.step,job.centerX,job.centerZ,job.key);
+      if(job.target==='full'&&mapOverlay.classList.contains('show')) redrawFullMap();
+      else if(job.target==='mini') drawWorldMap(miniMap,dynamicMapRadius()*MINI_MAP_OVERSCAN);
     };
     mapWorker.onerror=()=>{
-      const failed=[...mapWorkerPending.values()];mapWorkerPending.clear();mapWorker?.terminate();mapWorker=null;
-      failed.forEach(job=>queueLocalMapSnapshot(job.visibleRadius,job.step,job.centerX,job.centerZ,job.target));
+      const failed=[...mapWorkerPending.values()];mapWorkerPending.clear();mapTileJobs.mini=null;mapTileJobs.full=null;mapWorker?.terminate();mapWorker=null;
+      console.warn('Map v3 Worker stopped; using bounded main-thread tile fallback.');
+      for(const job of failed)queueLocalMapTiles(job.target,job.coords,job.step,job.centerX,job.centerZ,job.key);
     };
-  }catch(error){console.warn('Map Worker unavailable; using staged fallback.',error);mapWorker=null;}
+  }catch(error){ console.warn('Map v3 Worker unavailable; using bounded main-thread tile fallback.',error); mapWorker=null; }
 }
-function queueWorkerMapSnapshot(visibleRadius,step,centerX=player.pos.x,centerZ=player.pos.z,target='mini'){
-  const snapshotRadius=clamp(Math.max(visibleRadius+24,96),96,444),grid=Math.ceil((snapshotRadius*2+1)/step),bx=Math.floor(centerX),bz=Math.floor(centerZ),key=`${target}:${bx}:${bz}:${Math.round(visibleRadius)}:${step}`,pending=[...mapWorkerPending.values()].find(job=>job.target===target);
-  if(pending){if(pending.key===key)return;const drift=Math.max(Math.abs(bx-pending.centerX),Math.abs(bz-pending.centerZ));if(pending.step===step&&drift<24)return;mapWorkerPending.delete(pending.id);}
-  const id=++mapWorkerRequestId,version=mapDataVersion,materials={water:ID_WATER,lava:ID_LAVA,grass:BID.grass,sand:BID.sand,snow:BID.snow,stone:BID.stone},palette=[];
-  for(let i=0;i<BLOCKS.length;i++)palette[i]=mapTopColor(i).slice(0,3);
-  const baseX=bx-snapshotRadius,baseZ=bz-snapshotRadius;
-  mapWorkerPending.set(id,{id,key,target,version,centerX:bx,centerZ:bz,visibleRadius,step});
-  try{mapWorker.postMessage({type:'render',id,target,version,seed:SEED,baseX,baseZ,snapshotRadius,step,grid,materials,palette,edits:collectMapWorkerEdits(baseX,baseZ,snapshotRadius)});}catch(error){mapWorkerPending.delete(id);mapWorker.terminate();mapWorker=null;console.warn('Map Worker post failed; using staged fallback.',error);queueLocalMapSnapshot(visibleRadius,step,centerX,centerZ,target);}
-}
-initMapWorker();
-let mapRenderJob=null, mapRenderFramePending=false;
-function scheduleMapRenderFrame(){
-  if(mapRenderFramePending) return;
-  mapRenderFramePending=true; requestAnimationFrame(runMapRenderFrame);
-}
-function queueLocalMapSnapshot(visibleRadius,step,centerX=player.pos.x,centerZ=player.pos.z,target='mini'){
-  if(mapWorker){ queueWorkerMapSnapshot(visibleRadius,step,centerX,centerZ,target); return; }
-  const snapshotRadius=clamp(Math.max(visibleRadius+24,96),96,444);
-  const grid=Math.ceil((snapshotRadius*2+1)/step);
-  const bx=Math.floor(centerX), bz=Math.floor(centerZ), key=`${target}:${bx}:${bz}:${Math.round(visibleRadius)}:${step}`;
-  if(mapRenderJob){
-    if(mapRenderJob.key===key) return;
-    const sameTarget=mapRenderJob.target===target, drift=Math.max(Math.abs(bx-mapRenderJob.centerX),Math.abs(bz-mapRenderJob.centerZ));
-    if(sameTarget&&mapRenderJob.step===step&&drift<24) return;
-    if(target!=='full'&&mapRenderJob.target==='full') return;
+function renderLocalMapTile(tx,tz,step,target='mini'){
+  const size=MAP_TILE_SIZE,span=size*step,ox=tx*span,oz=tz*span,cols=new Array((size+2)*(size+2)),grid=size+2;
+  for(let z=-1;z<=size;z++) for(let x=-1;x<=size;x++) cols[(z+1)*grid+x+1]=mapColumn(ox+x*step,oz+z*step);
+  const colors=new Uint8Array(size*size*3);
+  for(let z=0;z<size;z++) for(let x=0;x<size;x++){
+    const i=(z+1)*grid+x+1,c=cols[i],w=cols[i-1],e=cols[i+1],n=cols[i-grid],s=cols[i+grid],relief=((w.y-e.y)+(n.y-s.y))*.018,rgb=shadeMapRGB(mapTopColor(c.id),c.y,relief,c.estimated),p=(z*size+x)*3;
+    colors[p]=rgb[0];colors[p+1]=rgb[1];colors[p+2]=rgb[2];
   }
-  const baseX=bx-snapshotRadius, baseZ=bz-snapshotRadius;
-  const raster=document.createElement('canvas'); raster.width=raster.height=grid;
-  const rasterCtx=raster.getContext('2d'), image=rasterCtx.createImageData(grid,grid);
-  mapRenderJob={key,target,version:mapDataVersion,centerX:bx,centerZ:bz,baseX,baseZ,visibleRadius,snapshotRadius,step,grid,columns:new Array(grid*grid),raster,rasterCtx,image,pixels:image.data,columnIndex:0,pixelIndex:0,phase:'columns'};
-  scheduleMapRenderFrame();
+  const indices=new Uint8Array(size*size);for(let i=0;i<indices.length;i++){const p=i*3;indices[i]=((colors[p]>=192?3:colors[p]>=128?2:colors[p]>=64?1:0)<<4)|((colors[p+1]>=192?3:colors[p+1]>=128?2:colors[p+1]>=64?1:0)<<2)|(colors[p+2]>=192?3:colors[p+2]>=128?2:colors[p+2]>=64?1:0);}
+  return rememberMapTile({source:'local',version:mapDataVersion,tx,tz,step,size,indices,markers:[]},target);
 }
-function mapPixelColor(job,index){
-  const gx=index%job.grid, gz=(index/job.grid)|0, c=job.columns[index];
-  if(!c) return [13,21,30];
-  const west=job.columns[gz*job.grid+Math.max(0,gx-1)], east=job.columns[gz*job.grid+Math.min(job.grid-1,gx+1)];
-  const north=job.columns[Math.max(0,gz-1)*job.grid+gx], south=job.columns[Math.min(job.grid-1,gz+1)*job.grid+gx];
-  const relief=((west?.y??c.y)-(east?.y??c.y)+(north?.y??c.y)-(south?.y??c.y))*.018;
-  let rgb=shadeMapRGB(mapTopColor(c.id),c.y,relief,c.estimated);
-  if(c.id!==ID_WATER&&c.id!==ID_LAVA&&c.y>SEA+5) rgb=rgb.map(v=>clamp(v+10,0,255));
-  return rgb;
-}
-function runMapRenderFrame(){
-  mapRenderFramePending=false; const job=mapRenderJob; if(!job) return;
-  const started=performance.now(), budget=4;
-  if(job.phase==='columns'){
-    while(job.columnIndex<job.columns.length&&performance.now()-started<budget){
-      const index=job.columnIndex++, gx=index%job.grid, gz=(index/job.grid)|0;
-      job.columns[index]=mapColumn(job.baseX+gx*job.step,job.baseZ+gz*job.step);
-    }
-    if(job.columnIndex>=job.columns.length) job.phase='pixels';
+function queueLocalMapTiles(target,coords,step,centerX,centerZ,key){
+  const cache=mapTileCaches[target],missing=coords.filter(({tx,tz})=>!cache.has(mapTileKey('server',step,tx,tz))&&!cache.has(mapTileKey('local',step,tx,tz)));
+  if(!missing.length){composeMapSnapshot(target,coords,step,centerX,centerZ,key);return;}
+  if(mapTileJobs[target]?.key===key)return;
+  const job={target,coords,step,centerX,centerZ,key,version:mapDataVersion};mapTileJobs[target]=job;
+  if(mapWorker){
+    const minX=Math.min(...missing.map(t=>t.tx))*MAP_TILE_SIZE*step-MAP_TILE_SIZE*step,minZ=Math.min(...missing.map(t=>t.tz))*MAP_TILE_SIZE*step-MAP_TILE_SIZE*step,maxX=(Math.max(...missing.map(t=>t.tx))+1)*MAP_TILE_SIZE*step+MAP_TILE_SIZE*step,maxZ=(Math.max(...missing.map(t=>t.tz))+1)*MAP_TILE_SIZE*step+MAP_TILE_SIZE*step;
+    const id=++mapWorkerRequestId;mapWorkerPending.set(id,job);
+    try{mapWorker.postMessage({type:'renderTiles',id,version:mapDataVersion,seed:SEED,step,tiles:missing,edits:collectMapWorkerEdits(minX,minZ,maxX,maxZ),materials:{water:ID_WATER,lava:ID_LAVA,grass:BID.grass,sand:BID.sand,snow:BID.snow,stone:BID.stone},palette:mapWorkerPalette()});return;}catch(error){mapWorkerPending.delete(id);mapWorker=null;}
   }
-  if(job.phase==='pixels'){
-    while(job.pixelIndex<job.columns.length&&performance.now()-started<budget){
-      const index=job.pixelIndex++, rgb=mapPixelColor(job,index), p=index*4;
-      job.pixels[p]=rgb[0]; job.pixels[p+1]=rgb[1]; job.pixels[p+2]=rgb[2]; job.pixels[p+3]=255;
-    }
-    if(job.pixelIndex>=job.columns.length){
-      if(job.version!==mapDataVersion){ mapRenderJob=null; return; }
-      job.rasterCtx.putImageData(job.image,0,0);
-      const snapshot={canvas:job.raster,baseX:job.baseX,baseZ:job.baseZ,radius:job.snapshotRadius,step:job.step,grid:job.grid,centerX:job.centerX,centerZ:job.centerZ,server:false,markers:[]};
-      if(job.target==='full'){ fullMapSnapshot=snapshot; fullMapSnapshotDirty=false; }
-      else { mapSnapshot=snapshot; mapSnapshotDirty=false; }
-      mapRenderJob=null;
-      if(job.target==='full'&&mapOverlay.classList.contains('show')) redrawFullMap();
-      return;
-    }
+  for(const tile of missing)renderLocalMapTile(tile.tx,tile.tz,step,target);
+  mapTileJobs[target]=null;composeMapSnapshot(target,coords,step,centerX,centerZ,key);
+}
+function applyServerMapTiles(data,target,version,key,coords,step,centerX,centerZ){
+  if(version!==mapDataVersion||serverMapKey[target]!==key)return;
+  if(!data||data.type!=='mapTiles'||Number(data.size)!==MAP_TILE_SIZE||!Array.isArray(data.tiles))throw new Error('Invalid server map tile response');
+  if(mapWorldId&&String(data.worldId||'')!==mapWorldId)throw new Error('Server map world changed; waiting for world snapshot');
+  if(Number.isFinite(Number(data.revision))&&Number(data.revision)<mapWorldRevision)throw new Error('Stale server map revision');
+  if(Number.isFinite(Number(data.revision)))mapWorldRevision=Math.max(mapWorldRevision,Number(data.revision));
+  if(Number.isFinite(Number(data.seed))&&Number(data.seed)!==SEED)throw new Error('Server map seed changed; waiting for world snapshot');
+  for(const raw of data.tiles){
+    const tx=Number(raw.tx),tz=Number(raw.tz),tileStep=Number(raw.step),encoded=typeof raw.indices==='string'?atob(raw.indices):'';
+    if(!Number.isInteger(tx)||!Number.isInteger(tz)||tileStep!==step||encoded.length!==MAP_TILE_SIZE*MAP_TILE_SIZE)continue;
+    const indices=new Uint8Array(encoded.length);for(let i=0;i<encoded.length;i++)indices[i]=encoded.charCodeAt(i);
+    rememberMapTile({source:'server',version,tx,tz,step,size:MAP_TILE_SIZE,indices,markers:Array.isArray(raw.markers)?raw.markers:[]},target);
   }
-  scheduleMapRenderFrame();
+  serverSnapshotKey[target]=key;serverMapKey[target]='';serverMapFetch[target]=null;serverMapFailed=false;serverMapRetryAt=0;mapTileJobs[target]=null;
+  composeMapSnapshot(target,coords,step,centerX,centerZ,key);
+  if(target==='full'&&mapOverlay.classList.contains('show'))redrawFullMap();else if(target==='mini')drawWorldMap(miniMap,dynamicMapRadius()*MINI_MAP_OVERSCAN);
 }
-function canUseServerMap(){ return !serverMapFailed && (location.protocol==='http:'||location.protocol==='https:') && multiplayer.connected; }
-function applyServerMapRaster(data,target='mini',version=mapDataVersion,requestKey=''){
-  if(version!==mapDataVersion){ serverMapKey[target]=''; return; }
-  if(!data||data.type!=='mapRaster'||!Number.isInteger(Number(data.grid))||typeof data.colors!=='string') throw new Error('Invalid server map raster');
-  const grid=Number(data.grid), raw=atob(data.colors),expected=grid*grid*3;
-  if(grid<1||grid>2048||raw.length<expected) throw new Error('Incomplete server map raster');
-  if(Number.isFinite(Number(data.seed))&&Number(data.seed)!==SEED) throw new Error('Server map seed changed; waiting for world snapshot');
-  const raster=document.createElement('canvas'); raster.width=raster.height=grid;
-  const ctx=raster.getContext('2d'), image=ctx.createImageData(grid,grid), pixels=image.data;
-  for(let i=0;i<grid*grid;i++){ const src=i*3,dst=i*4; pixels[dst]=raw.charCodeAt(src); pixels[dst+1]=raw.charCodeAt(src+1); pixels[dst+2]=raw.charCodeAt(src+2); pixels[dst+3]=255; }
-  ctx.putImageData(image,0,0);
-  const baseX=Number(data.baseX)||0, baseZ=Number(data.baseZ)||0, radius=Number(data.radius)||96, mapStep=Number(data.step)||1;
-  mapServerMarkers[target]=Array.isArray(data.markers)?data.markers:[];
-  const snapshot={canvas:raster,baseX,baseZ,radius,step:mapStep,grid,centerX:baseX+radius,centerZ:baseZ+radius,server:true,requestKey,markers:mapServerMarkers[target]};
-  if(target==='full'){ fullMapSnapshot=snapshot; fullMapSnapshotDirty=false; }
-  else { mapSnapshot=snapshot; mapSnapshotDirty=false; }
-  // Keep this separate from serverMapKey: the latter is a fetch de-dup key
-  // and is cleared after commit, while Worker commits need to know which
-  // Server request is currently authoritative.
-  serverSnapshotKey[target]=requestKey;
-  serverMapKey[target]='';
-  if(target==='full'&&mapOverlay.classList.contains('show')) redrawFullMap();
+function composeMapSnapshot(target,coords,step,centerX,centerZ,requestKey){
+  if(!coords.length)return false;
+  const minTX=Math.min(...coords.map(t=>t.tx)),maxTX=Math.max(...coords.map(t=>t.tx)),minTZ=Math.min(...coords.map(t=>t.tz)),maxTZ=Math.max(...coords.map(t=>t.tz)),width=maxTX-minTX+1,height=maxTZ-minTZ+1,grid=width*MAP_TILE_SIZE;
+  const tiles=[];for(const item of coords){const tile=findMapTile(target,step,item.tx,item.tz);if(!tile)return false;tiles.push(tile);}
+  const raster=document.createElement('canvas');raster.width=grid;raster.height=height*MAP_TILE_SIZE;const ctx=raster.getContext('2d'),image=ctx.createImageData(MAP_TILE_SIZE,MAP_TILE_SIZE),markers=[],markerKeys=new Set();let allServer=true;
+  for(const tile of tiles){
+    const indices=tile.indices;if(!(indices instanceof Uint8Array)||indices.length!==MAP_TILE_SIZE*MAP_TILE_SIZE)return false;
+    for(let i=0;i<MAP_TILE_SIZE*MAP_TILE_SIZE;i++){const dst=i*4,rgb=mapIndexRGB(indices[i]);image.data[dst]=rgb[0];image.data[dst+1]=rgb[1];image.data[dst+2]=rgb[2];image.data[dst+3]=255;}
+    ctx.putImageData(image,(tile.tx-minTX)*MAP_TILE_SIZE,(tile.tz-minTZ)*MAP_TILE_SIZE);
+    if(tile.source!=='server')allServer=false;
+    for(const marker of(tile.markers||[])){const markerKey=`${marker.type}:${marker.x}:${marker.z}`;if(!markerKeys.has(markerKey)){markerKeys.add(markerKey);markers.push(marker);}}
+  }
+  if(!allServer)for(const marker of collectLocalMapMarkers(coords,step)){const markerKey=`${marker.type}:${marker.x}:${marker.z}`;if(!markerKeys.has(markerKey)){markerKeys.add(markerKey);markers.push(marker);}}
+  const snapshot={canvas:raster,baseX:minTX*MAP_TILE_SIZE*step,baseZ:minTZ*MAP_TILE_SIZE*step,radius:grid*step/2,step,grid,centerX,centerZ,server:allServer,requestKey,markers};
+  if(target==='full'){fullMapSnapshot=snapshot;fullMapSnapshotDirty=false;}else{mapSnapshot=snapshot;mapSnapshotDirty=false;}
+  return true;
 }
-function requestServerMapSnapshot(visibleRadius,step,centerX=player.pos.x,centerZ=player.pos.z,target='mini'){
-  if(!canUseServerMap()) return;
-  centerX=Math.floor(centerX); centerZ=Math.floor(centerZ); serverMapRequestTarget=target;
-  const key=`${target}:${SEED}:${centerX}:${centerZ}:${Math.round(visibleRadius)}:${step}`;
-  if(serverMapFetch[target]||serverMapKey[target]===key) return;
-  serverMapKey[target]=key; const version=mapDataVersion;
-  const url=`/api/map?x=${centerX}&z=${centerZ}&radius=${Math.round(visibleRadius)}&step=${step}`;
-  serverMapFetch[target]=fetch(url,{cache:'no-store'}).then(r=>{if(!r.ok)throw new Error('Server map unavailable');return r.json();}).then(data=>applyServerMapRaster(data,target,version,key)).catch(error=>{ serverMapKey[target]=''; serverMapFailed=true; console.warn(error); }).finally(()=>{serverMapFetch[target]=null;});
+function canUseServerMap(){
+  if(serverMapFailed&&Date.now()<serverMapRetryAt)return false;
+  if(serverMapFailed)serverMapFailed=false;
+  return (location.protocol==='http:'||location.protocol==='https:')&&multiplayer.connected;
+}
+function requestServerMapTiles(target,coords,step,radius,centerX,centerZ,key){
+  if(!canUseServerMap()||serverMapFetch[target]||serverMapKey[target]===key)return;
+  serverMapRequestTarget=target;serverMapKey[target]=key;const version=mapDataVersion;
+  const url=`/api/map/tiles?x=${Math.floor(centerX)}&z=${Math.floor(centerZ)}&radius=${Math.round(radius)}&step=${step}`;
+  serverMapFetch[target]=fetch(url,{cache:'no-store'}).then(r=>{if(!r.ok)throw new Error('Server map tiles unavailable');return r.json();}).then(data=>applyServerMapTiles(data,target,version,key,coords,step,centerX,centerZ)).catch(error=>{if(version===mapDataVersion){serverMapKey[target]='';serverMapFetch[target]=null;serverMapFailed=true;serverMapRetryAt=Date.now()+8000;console.warn('Map v3 server tiles unavailable; keeping last good frame.',error);}});
 }
 function ensureMapSnapshot(visibleRadius,step,centerX=player.pos.x,centerZ=player.pos.z,full=false){
-  const snapshot=full?fullMapSnapshot:mapSnapshot, dirty=full?fullMapSnapshotDirty:mapSnapshotDirty;
-  const margin=snapshot.radius-visibleRadius-10;
-  const moved=Math.max(Math.abs(centerX-snapshot.centerX),Math.abs(centerZ-snapshot.centerZ));
-  const needs=dirty || !snapshot.canvas || snapshot.step!==step || visibleRadius>snapshot.radius-12 || moved>Math.max(8,margin);
-  const mapDragging=fullMapPointers.size>0, target=full?'full':'mini';
-  if(canUseServerMap()){
-    if(needs&&!mapDragging) requestServerMapSnapshot(visibleRadius,step,centerX,centerZ,target);
-    if(needs&&!mapDragging) queueLocalMapSnapshot(visibleRadius,step,centerX,centerZ,target);
-  }else if(needs&&!mapDragging) queueLocalMapSnapshot(visibleRadius,step,centerX,centerZ,target);
+  const target=full?'full':'mini',snapshot=full?fullMapSnapshot:mapSnapshot,key=mapRequestKey(target,step,visibleRadius,centerX,centerZ),coords=mapTileCoords(visibleRadius,step,centerX,centerZ);
+  const hasCoverage=snapshot.canvas&&snapshot.step===step&&snapshot.baseX<=centerX-visibleRadius&&snapshot.baseZ<=centerZ-visibleRadius&&snapshot.baseX+snapshot.grid*step>=centerX+visibleRadius&&snapshot.baseZ+snapshot.grid*step>=centerZ+visibleRadius;
+  if(hasCoverage&&snapshot.requestKey===key)return;
+  if(mapTileJobs[target]?.key===key)return;
+  if(canUseServerMap())requestServerMapTiles(target,coords,step,visibleRadius,centerX,centerZ,key);
+  queueLocalMapTiles(target,coords,step,centerX,centerZ,key);
+  composeMapSnapshot(target,coords,step,centerX,centerZ,key);
+}
+function drawMapPlaceholder(ctx,canvas,full){
+  const w=canvas.width,h=canvas.height;ctx.fillStyle='#2b4053';ctx.fillRect(0,0,w,h);ctx.fillStyle='rgba(123,177,188,.12)';
+  for(let x=-h;x<w+h;x+=32){ctx.save();ctx.translate(x,0);ctx.rotate(Math.PI/4);ctx.fillRect(0,0,1,(w+h)*2);ctx.restore();}
+  ctx.fillStyle='rgba(225,241,238,.72)';ctx.font='700 11px monospace';ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText(full?'MAP TILE CACHE · LOADING':'MAP · LOADING',w/2,h/2);
 }
 function drawWorldMap(canvas,radius,full=false,skipYou=false){
-  if(!canvas) return;
-  const ctx=canvas.getContext('2d'); if(!ctx) return;
-  const miniCanvas=!full&&canvas===miniMap, labelStage=full?worldMapStage:miniMapStage;
-  clearDynamicMapLabels(labelStage);
-  const baseRadius=Math.max(48,Math.round(radius));
-  const zoom=full?clamp(fullMapView.zoom,.2,8):1;
-  const viewRadius=Math.min(420,Math.max(8,baseRadius/zoom)), worldSpan=viewRadius*2+1;
-  const centerX=full?player.pos.x+fullMapView.panX:player.pos.x;
-  const centerZ=full?player.pos.z+fullMapView.panZ:player.pos.z;
-  const step=mapStepForView(full,zoom);
+  if(!canvas)return;const ctx=canvas.getContext('2d');if(!ctx)return;
+  const miniCanvas=!full&&canvas===miniMap,labelStage=full?worldMapStage:miniMapStage;clearDynamicMapLabels(labelStage);
+  const baseRadius=Math.max(48,Math.round(radius)),zoom=full?clamp(fullMapView.zoom,.2,8):1,viewRadius=Math.min(420,Math.max(8,baseRadius/zoom)),worldSpan=viewRadius*2+1,centerX=full?player.pos.x+fullMapView.panX:player.pos.x,centerZ=full?player.pos.z+fullMapView.panZ:player.pos.z,step=mapStepForView(full,zoom);
+  if(full)fullMapFrame={radius:viewRadius,centerX,centerZ,canvasSize:canvas.width,worldSpan};
   ensureMapSnapshot(viewRadius,step,centerX,centerZ,full);
   const snapshot=full?(fullMapSnapshot.canvas?fullMapSnapshot:mapSnapshot):mapSnapshot;
-  if(full) fullMapFrame={radius:viewRadius,centerX,centerZ,canvasSize:canvas.width,worldSpan};
-  const tile=canvas.width/worldSpan;
-  const visibleBaseX=Math.floor(centerX-viewRadius), visibleBaseZ=Math.floor(centerZ-viewRadius);
-  const sourceX=(visibleBaseX-snapshot.baseX)/snapshot.step;
-  const sourceZ=(visibleBaseZ-snapshot.baseZ)/snapshot.step;
-  const sourceSize=worldSpan/snapshot.step;
-  ctx.clearRect(0,0,canvas.width,canvas.height); ctx.imageSmoothingEnabled=full;
-  ctx.fillStyle='#101820'; ctx.fillRect(0,0,canvas.width,canvas.height);
-  if(snapshot.canvas){
-    const sx=Math.max(0,sourceX), sy=Math.max(0,sourceZ), sw=Math.min(sourceSize,snapshot.canvas.width-sx), sh=Math.min(sourceSize,snapshot.canvas.height-sy);
-    if(sw>0&&sh>0){
-      const dx=(sx-sourceX)/sourceSize*canvas.width, dy=(sy-sourceZ)/sourceSize*canvas.height;
-      ctx.drawImage(snapshot.canvas,sx,sy,sw,sh,dx,dy,sw/sourceSize*canvas.width,sh/sourceSize*canvas.height);
-    }
-  }
-  ctx.strokeStyle='rgba(0,0,0,.24)'; ctx.lineWidth=1;
-  for(let world=0;world<=worldSpan;world+=CS){
-    const p=world/worldSpan*canvas.width;
-    ctx.beginPath(); ctx.moveTo(p,0); ctx.lineTo(p,canvas.height); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(0,p); ctx.lineTo(canvas.width,p); ctx.stroke();
-  }
-  if(snapshot.markers) for(const marker of snapshot.markers){
-    const mx=canvas.width/2+(Number(marker.x)-centerX)*tile, mz=canvas.height/2+(Number(marker.z)-centerZ)*tile;
-    if(mx>=8&&mz>=8&&mx<=canvas.width-8&&mz<=canvas.height-8) drawMapCabin(ctx,mx,mz);
-  }
-  if(knownClaims.length||claimPreview) drawMapClaims(ctx,centerX,centerZ,tile,canvas.width);
-  const playerX=canvas.width/2+(player.pos.x-centerX)*tile, playerZ=canvas.height/2+(player.pos.z-centerZ)*tile;
-  // YOU is a fixed DOM overlay, never part of the rotating/rasterized map.
-  if(!skipYou&&!miniCanvas&&!full) drawMapMarker(ctx,playerX,playerZ,player.yaw,'#ffe45c',true,'');
-  if(full) updateFullMapPlayerMarker();
-  if(multiplayer.connected) remotePlayers.forEach(remote=>drawMapPlayer(ctx,remote,centerX,centerZ,tile,canvas.width,viewRadius,labelStage,miniCanvas?player.yaw:0));
-  if(miniMapTitle&&miniCanvas){
-    miniMapTitle.textContent=snapshot.server?'SERVER SATELLITE':'LOCAL SATELLITE';
-    miniMapCoords.textContent=`X ${Math.floor(player.pos.x)}  Z ${Math.floor(player.pos.z)}`;
-    miniMapYou.style.display='block';
-  }
-  if(full&&fullMapTitle){
-    fullMapTitle.textContent=snapshot.server?'SERVER SATELLITE':'LOCAL SATELLITE';
-    fullMapCoords.textContent=`X ${Math.floor(player.pos.x)}  Z ${Math.floor(player.pos.z)}`;
-    fullMapZoom.textContent=`ZOOM ${(zoom*100).toFixed(0)}% · PAN ${Math.round(fullMapView.panX)},${Math.round(fullMapView.panZ)}`;
-  }
+  if(!snapshot?.canvas){if(canvas.dataset.mapReady!=='1'){drawMapPlaceholder(ctx,canvas,full);canvas.dataset.mapReady='1';}return;}
+  const tile=canvas.width/worldSpan,visibleBaseX=centerX-viewRadius,visibleBaseZ=centerZ-viewRadius,sourceX=(visibleBaseX-snapshot.baseX)/snapshot.step,sourceZ=(visibleBaseZ-snapshot.baseZ)/snapshot.step,sourceSize=worldSpan/snapshot.step;
+  ctx.clearRect(0,0,canvas.width,canvas.height);ctx.fillStyle='#2b4053';ctx.fillRect(0,0,canvas.width,canvas.height);ctx.imageSmoothingEnabled=full;
+  const sx=Math.max(0,sourceX),sy=Math.max(0,sourceZ),sw=Math.min(sourceSize,snapshot.canvas.width-sx),sh=Math.min(sourceSize,snapshot.canvas.height-sy);
+  if(sw>0&&sh>0){const dx=(sx-sourceX)/sourceSize*canvas.width,dy=(sy-sourceZ)/sourceSize*canvas.height;ctx.drawImage(snapshot.canvas,sx,sy,sw,sh,dx,dy,sw/sourceSize*canvas.width,sh/sourceSize*canvas.height);}
+  ctx.strokeStyle='rgba(0,0,0,.24)';ctx.lineWidth=1;for(let world=0;world<=worldSpan;world+=CS){const p=world/worldSpan*canvas.width;ctx.beginPath();ctx.moveTo(p,0);ctx.lineTo(p,canvas.height);ctx.stroke();ctx.beginPath();ctx.moveTo(0,p);ctx.lineTo(canvas.width,p);ctx.stroke();}
+  for(const marker of(snapshot.markers||[])){const mx=canvas.width/2+(Number(marker.x)-centerX)*tile,mz=canvas.height/2+(Number(marker.z)-centerZ)*tile;if(mx>=8&&mz>=8&&mx<=canvas.width-8&&mz<=canvas.height-8)drawMapCabin(ctx,mx,mz);}
+  if(knownClaims.length||claimPreview)drawMapClaims(ctx,centerX,centerZ,tile,canvas.width);
+  const playerX=canvas.width/2+(player.pos.x-centerX)*tile,playerZ=canvas.height/2+(player.pos.z-centerZ)*tile;
+  if(!skipYou&&!miniCanvas&&!full)drawMapMarker(ctx,playerX,playerZ,player.yaw,'#ffe45c',true,'');
+  if(full)updateFullMapPlayerMarker();
+  if(multiplayer.connected)remotePlayers.forEach(remote=>drawMapPlayer(ctx,remote,centerX,centerZ,tile,canvas.width,viewRadius,labelStage,miniCanvas?player.yaw:0));
+  canvas.dataset.mapReady='1';
+  if(miniMapTitle&&miniCanvas){miniMapTitle.textContent=snapshot.server?'SERVER TILES':'LOCAL TILES';miniMapCoords.textContent=`X ${Math.floor(player.pos.x)}  Z ${Math.floor(player.pos.z)}`;miniMapYou.style.display='block';}
+  if(full&&fullMapTitle){fullMapTitle.textContent=snapshot.server?'SERVER TILES':'LOCAL TILES';fullMapCoords.textContent=`X ${Math.floor(player.pos.x)}  Z ${Math.floor(player.pos.z)}`;fullMapZoom.textContent=`ZOOM ${(zoom*100).toFixed(0)}% · PAN ${Math.round(fullMapView.panX)},${Math.round(fullMapView.panZ)}`;}
 }
+initMapWorker();
 let mapLastDraw=0;
+
 function updateWorldMaps(now){
   // Rotate the already-composited Mini-map canvas directly. No second map
   // raster and no extra Canvas draw is needed when the player turns.
