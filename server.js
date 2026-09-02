@@ -1025,12 +1025,6 @@ function serverCabinSpec(cx,cz,cache){
   }
   cache.set(key,spec); return spec;
 }
-function serverCabinRoof(x,z,terrain,cache){
-  const cx=Math.floor(x/16),cz=Math.floor(z/16),lx=x-cx*16,lz=z-cz*16,spec=serverCabinSpec(cx,cz,cache);
-  if(!spec||lx<3||lx>12||lz<3||lz>11) return null;
-  let top=spec.baseY+4; if(lz===7&&lx>3&&lx<12) top=spec.baseY+5;
-  return top>=terrain.h?{h:top,id:12,biome:terrain.biome,edited:true}:null;
-}
 // Generated base voxels are resolved lazily from the same seed/hash/noise rules
 // used by client/index.html. Edits stay separate so a cache never hides an
 // authoritative player edit.
@@ -1136,12 +1130,15 @@ function serverGenerateBaseChunk(cx,cz){
   }
   return data;
 }
+function serverBaseChunkData(cx,cz){
+  if(serverBaseChunkCacheSeed!==world.seed){serverBaseChunkCacheSeed=world.seed;serverBaseChunkCache.clear();}
+  const key=serverBaseChunkKey(cx,cz);let data=serverBaseChunkCache.get(key);
+  if(!data){data=serverGenerateBaseChunk(cx,cz);serverBaseChunkCache.set(key,data);if(serverBaseChunkCache.size>256)serverBaseChunkCache.delete(serverBaseChunkCache.keys().next().value);}
+  return data;
+}
 function serverBaseBlockAt(x,y,z){
   if(y<0||y>=WORLD_HEIGHT)return 0;
-  if(serverBaseChunkCacheSeed!==world.seed){serverBaseChunkCacheSeed=world.seed;serverBaseChunkCache.clear();}
-  const cx=Math.floor(x/16),cz=Math.floor(z/16),key=serverBaseChunkKey(cx,cz);
-  let data=serverBaseChunkCache.get(key);
-  if(!data){data=serverGenerateBaseChunk(cx,cz);serverBaseChunkCache.set(key,data);if(serverBaseChunkCache.size>256)serverBaseChunkCache.delete(serverBaseChunkCache.keys().next().value);}
+  const cx=Math.floor(x/16),cz=Math.floor(z/16),data=serverBaseChunkData(cx,cz);
   return data[(y<<8)|((z-cz*16)<<4)|(x-cx*16)]||0;
 }
 
@@ -1154,7 +1151,7 @@ const SERVER_MAP_COLORS={
   42:[145,112,76],43:[122,82,47],44:[154,108,59],45:[250,193,76],46:[158,112,59],47:[125,79,42],48:[175,130,73],49:[109,67,38],50:[158,112,59],51:[170,134,80]
 };
 function serverMapRGB(column,id){
-  if(id===20||column.biome==='river') return [55,125,215];
+  if(id===20) return [55,125,215];
   if(id===21) return [225,83,22];
   if(id&&SERVER_MAP_COLORS[id]) return SERVER_MAP_COLORS[id];
   if(column.biome==='desert') return [221,208,160];
@@ -1174,22 +1171,13 @@ function serverMapEditColumns(){
   }
   return columns;
 }
-function serverMapColumnWithEdits(x,z,terrain,cabin,editColumns){
-  const edits=editColumns.get(x+','+z);
-  if(!edits) return cabin||terrain;
-  const base=cabin||terrain;
-  let highestPlaced=null;
-  for(const [y,id] of edits){ if(id>0&&(!highestPlaced||y>highestPlaced.y)) highestPlaced={y,id}; }
-  if(highestPlaced&&highestPlaced.y>=base.h) return {h:highestPlaced.y,id:highestPlaced.id,biome:terrain.biome,edited:true};
-  // If the visible top was removed, expose the next natural layer. For a
-  // cabin roof this is intentionally conservative: its underlying terrain is
-  // still preferable to showing a stale roof in the authoritative raster.
-  if(edits.get(base.h)===0){
-    const lower=highestPlaced&&highestPlaced.y<base.h?highestPlaced:null;
-    if(lower) return {h:lower.y,id:lower.id,biome:terrain.biome,edited:true};
-    return base===cabin?terrain:{h:Math.max(0,terrain.h-1),id:terrain.id,biome:terrain.biome,edited:true};
+function serverMapVisibleColumn(x,z,editColumns){
+  const cx=Math.floor(x/16),cz=Math.floor(z/16),lx=x-cx*16,lz=z-cz*16,data=serverBaseChunkData(cx,cz),edits=editColumns.get(x+','+z),terrain=serverMapColumn(x,z);
+  for(let y=WORLD_HEIGHT-1;y>=0;y--){
+    const id=edits&&edits.has(y)?Number(edits.get(y)):data[(y<<8)|(lz<<4)|lx]||0;
+    if(id!==0)return {h:y,id,biome:terrain.biome,edited:!!(edits&&edits.has(y))};
   }
-  return base;
+  return {h:0,id:0,biome:terrain.biome,edited:!!edits};
 }
 function computeMapColumnPixel(c, west, east, north, south) {
   const relief = ((west.h - east.h) + (north.h - south.h)) * .018;
@@ -1211,9 +1199,11 @@ function serverMapTile(tx,tz,step,sharedEditColumns=null){
   const size=MAP_TILE_SIZE,worldSize=size*step,originX=tx*worldSize,originZ=tz*worldSize;
   const editColumns=sharedEditColumns||serverMapEditColumns(),cabinCache=new Map(),padded=size+2,columns=new Array(padded*padded);
   for(let gz=-1;gz<=size;gz++) for(let gx=-1;gx<=size;gx++){
-    const x=originX+gx*step,z=originZ+gz*step,terrain=serverMapColumn(x,z),cabin=serverCabinRoof(x,z,terrain,cabinCache);
-    columns[(gz+1)*padded+(gx+1)]=serverMapColumnWithEdits(x,z,terrain,cabin,editColumns);
+    const x=originX+gx*step,z=originZ+gz*step;
+    columns[(gz+1)*padded+(gx+1)]=serverMapVisibleColumn(x,z,editColumns);
   }
+  const minCX=Math.floor(originX/16)-1,maxCX=Math.floor((originX+worldSize-1)/16)+1,minCZ=Math.floor(originZ/16)-1,maxCZ=Math.floor((originZ+worldSize-1)/16)+1;
+  for(let cz=minCZ;cz<=maxCZ;cz++)for(let cx=minCX;cx<=maxCX;cx++)serverCabinSpec(cx,cz,cabinCache);
   const rgbPixels=Buffer.alloc(size*size*3);
   for(let gz=0;gz<size;gz++) for(let gx=0;gx<size;gx++){
     const i=(gz+1)*padded+(gx+1),c=columns[i],west=columns[i-1],east=columns[i+1],north=columns[i-padded],south=columns[i+padded],rgb=computeMapColumnPixel(c,west,east,north,south),p=(gz*size+gx)*3;

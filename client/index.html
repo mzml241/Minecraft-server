@@ -3938,6 +3938,8 @@ const MINI_MAP_OVERSCAN=1.5, MAP_TILE_SIZE=64, MAP_TILE_CACHE_LIMIT=128, MAP_IND
 function mapIndexRGB(index){return [MAP_INDEX_LEVELS[(index>>4)&3],MAP_INDEX_LEVELS[(index>>2)&3],MAP_INDEX_LEVELS[index&3]];}
 let miniMapRotation=NaN;
 const mapTileCaches={mini:new Map(),full:new Map()}, mapTileJobs={mini:null,full:null};
+const MAP_AUTHORITATIVE_REFRESH_MS=12*60*1000;
+let mapRefreshEpoch=0,mapRefreshDueAt=MAP_AUTHORITATIVE_REFRESH_MS;
 let mapWorldId='', mapWorldRevision=0;
 mapTileInvalidator=(x,z)=>{
   if(!Number.isFinite(Number(x))||!Number.isFinite(Number(z))){mapTileCaches.mini.clear();mapTileCaches.full.clear();localMapMarkerCache?.clear?.();return;}
@@ -3995,7 +3997,7 @@ function mapTileCoords(radius,step,centerX,centerZ){
 }
 function mapRequestKey(target,step,radius,centerX,centerZ){
   const span=MAP_TILE_SIZE*step;
-  return `${target}:${mapDataVersion}:${step}:${Math.floor(centerX/span)}:${Math.floor(centerZ/span)}:${Math.ceil(radius/span)}`;
+  return `${target}:${mapDataVersion}:${mapRefreshEpoch}:${step}:${Math.floor(centerX/span)}:${Math.floor(centerZ/span)}:${Math.ceil(radius/span)}`;
 }
 const localMapMarkerCache=new Map();
 function collectLocalMapMarkers(coords,step){
@@ -4185,8 +4187,16 @@ function drawWorldMap(canvas,radius,full=false,skipYou=false){
 }
 initMapWorker();
 let mapLastDraw=0;
-
+function refreshAuthoritativeMapIfDue(now){
+  if(now<mapRefreshDueAt)return;
+  mapRefreshDueAt=now+MAP_AUTHORITATIVE_REFRESH_MS;mapRefreshEpoch++;
+  // Keep both last-good canvases visible while the server rechecks the
+  // generated voxel columns. World edits still invalidate affected tiles sooner.
+  mapSnapshotDirty=true;fullMapSnapshotDirty=true;
+}
 function updateWorldMaps(now){
+  refreshAuthoritativeMapIfDue(now);
+
   // Rotate the already-composited Mini-map canvas directly. No second map
   // raster and no extra Canvas draw is needed when the player turns.
   updateMiniMapRotation();

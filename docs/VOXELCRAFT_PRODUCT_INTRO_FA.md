@@ -855,6 +855,7 @@ Propهای تعاملی با raycast decoration یا block target تشخیص د�
 در multiplayer، کلاینت پنجرهٔ محدود tileها را از `/api/map/tiles?x=...&z=...&radius=...&step=...` دریافت می‌کند؛ `/api/map` فقط alias همین قرارداد است. پاسخ `mapTiles` شامل `worldId`، `seed`، `revision`، `step` و tileهای ۶۴×۶۴ است. هر tile مختصات `tx/tz` و `indices` به‌صورت base64 دارد؛ decoded payload دقیقاً ۴۰۹۶ byte است و هر byte با palette مشترک به RGB معتبر تبدیل می‌شود. markerهای cabin جدا از base raster بازگردانده می‌شوند.
 
 Mini و Full request/cache مستقل دارند، اما قرارداد tile یکسان است. LODهای Full از stepهای `1`، `2` و `4` استفاده می‌کنند. شعاع view ثابت است و سرعت بازیکن آن را بزرگ نمی‌کند؛ حرکت فقط از tileهای cacheشده یا پنجرهٔ محدود بعدی استفاده می‌کند.
+هر دو view هر ۱۲ دقیقه یک refresh authoritative انجام می‌دهند تا خانه‌ها و ساختارهای تازه‌نمایان‌شده بدون pan یا حرکت هم وارد map شوند؛ editهای عادی با invalidation همان tile و LODهای والد زودتر دیده می‌شوند.
 
 ### atomic commit و مقاومت در برابر black frame
 
