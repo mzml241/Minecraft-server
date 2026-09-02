@@ -3,7 +3,6 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { WebSocketServer, WebSocket } = require('ws');
-const BLOCK_CONTRACT = JSON.parse(fs.readFileSync(path.join(__dirname, 'shared', 'block-registry.json'), 'utf8'));
 
 const HOST = process.env.HOST || '0.0.0.0';
 const PORT = Number(process.env.PORT || 3000);
@@ -58,10 +57,8 @@ const PHYSICS_CONFIG = Object.freeze({
     autoStep: true
   })
 });
-// The same registry is injected into the browser build and used here for
-// validation, collision metadata, persistence and protocol compatibility.
-const MAX_BLOCK_ID = Math.max(...Object.values(BLOCK_CONTRACT.ids).map(Number));
-const BLOCK_SHAPES = BLOCK_CONTRACT.blockShapes || {};
+// Keep this in sync with the current client block registry (IDs 1 through 51).
+const MAX_BLOCK_ID = 51;
 const MAX_PLAYERS = Number(process.env.MAX_PLAYERS || 20);
 const SPAWN_MIN_DISTANCE = Math.max(20, Number(process.env.SPAWN_MIN_DISTANCE || 20));
 const SPAWN_RESERVATION_TTL_MS = Math.max(60 * 60 * 1000, Number(process.env.SPAWN_RESERVATION_TTL_MS || 24 * 60 * 60 * 1000));
@@ -133,7 +130,7 @@ const worlds = new Map();
 let activeWorldId='main';
 function makeWorld(id='main', overrides={}){
   return {
-    format: 'voxelcraft-server-world', version: 2,
+    format: 'voxelcraft-server-world', version: 1,
     id: safeWorldId(id),
     name: overrides.name || (id==='main' ? process.env.WORLD_NAME || 'VoxelCraft Multiplayer' : safeName(id)),
     seed: Number(overrides.seed ?? process.env.WORLD_SEED ?? 18699877) | 0,
@@ -142,7 +139,6 @@ function makeWorld(id='main', overrides={}){
     spawn: overrides.spawn && Number.isFinite(Number(overrides.spawn.x)) && Number.isFinite(Number(overrides.spawn.z)) ? {x:Number(overrides.spawn.x),z:Number(overrides.spawn.z)} : {x:0.5,z:0.5},
     revision: Number.isInteger(overrides.revision) ? overrides.revision : 0,
     edits: overrides.edits && typeof overrides.edits==='object' ? overrides.edits : {},
-    blockStates: overrides.blockStates && typeof overrides.blockStates==='object' ? overrides.blockStates : {},
     doors: overrides.doors && typeof overrides.doors==='object' ? overrides.doors : {},
     lights: overrides.lights && typeof overrides.lights==='object' ? overrides.lights : {},
     claims: normalizeClaims(overrides.claims),
@@ -610,7 +606,6 @@ function loadWorldFile(filePath,id){
       const loaded=makeWorld(id,{...base,...saved});
       loaded.id=safeWorldId(id);
       loaded.edits=saved.edits&&typeof saved.edits==='object'?saved.edits:{};
-      loaded.blockStates=saved.blockStates&&typeof saved.blockStates==='object'?saved.blockStates:{};
       loaded.revision=Number.isInteger(saved.revision)?saved.revision:Object.keys(loaded.edits).length;
       log('Loaded world',loaded.name,'seed',loaded.seed,'edits',Object.keys(loaded.edits).length);
       return loaded;
@@ -638,7 +633,6 @@ function saveWorldRecord(record) {
   try {
     ensureWorldDir();
     const data = { ...record, savedAt: new Date().toISOString() };
-    if(record===world) data.blockStates=blockStatesPayload();
     atomicWriteJson(worldPath(record.id),data);
     record.savedAt = data.savedAt;
     return true;
@@ -669,13 +663,12 @@ function importWorldPayload(payload) {
   if (!payload || typeof payload !== 'object') throw new Error('Invalid JSON world file');
   if (!Number.isFinite(Number(payload.seed))) throw new Error('World file has no valid seed');
 
-  const nextEdits = {}, nextStates = {};
-  const addEdit = (x, y, z, id, state=null) => {
+  const nextEdits = {};
+  const addEdit = (x, y, z, id) => {
     if (!Number.isInteger(x) || !Number.isInteger(y) || !Number.isInteger(z)) return;
     if (y < 1 || y >= WORLD_HEIGHT || Math.abs(x) > 1000000 || Math.abs(z) > 1000000) return;
     if (!Number.isInteger(id) || id < 0 || id > MAX_BLOCK_ID) return;
-    const key=editKey(x,y,z); nextEdits[key] = id;
-    if(state&&typeof state==='object') nextStates[key]=normalizeBlockState(id,state);
+    nextEdits[editKey(x, y, z)] = id;
   };
 
   // Server exports use world.edits: {"x,y,z": id}.
@@ -711,11 +704,7 @@ function importWorldPayload(payload) {
   if (spawn && Number.isFinite(Number(spawn.x)) && Number.isFinite(Number(spawn.z))) {
     world.spawn = { x: Number(spawn.x), z: Number(spawn.z) };
   }
-  if(payload.blockStates&&typeof payload.blockStates==='object') for(const [key,state] of Object.entries(payload.blockStates)){
-    const id=nextEdits[key]; if(Number.isInteger(id)&&state&&typeof state==='object') nextStates[key]=normalizeBlockState(id,state);
-  }
   world.edits = nextEdits;
-  world.blockStates = nextStates;
   world.revision = Object.keys(nextEdits).length;
   world.doors = {};
   for(const [key,value] of Object.entries(payload.doors||{})) if(value===true && /^-?\d+,-?\d+,-?\d+$/.test(key)) world.doors[key]=true;
@@ -890,7 +879,7 @@ function allocateSpawnSlot(identityKey,playerId='') {
   const reserve=(candidate)=>{
     if(!spawnSlotAvailable(candidate,identityKey)) return null;
     const top=serverWalkHeight(candidate.x,candidate.z);
-    const reservation={worldId:world.id,x:candidate.x,y:top+0.02,z:candidate.z,playerId:playerId||'',reservedAt:iso,expiresAt:now+SPAWN_RESERVATION_TTL_MS};
+    const reservation={worldId:world.id,x:candidate.x,y:top+1.02,z:candidate.z,playerId:playerId||'',reservedAt:iso,expiresAt:now+SPAWN_RESERVATION_TTL_MS};
     spawnReservations.set(identityKey,reservation); saveSpawnReservations();
     return {x:reservation.x,y:reservation.y,z:reservation.z};
   };
@@ -1159,8 +1148,7 @@ const SERVER_MAP_COLORS={
   13:[152,86,66],14:[126,127,130],15:[86,124,58],16:[216,203,155],17:[247,251,255],18:[158,204,244],
   19:[210,235,245],20:[55,125,215],21:[225,83,22],22:[58,58,62],23:[34,34,36],24:[196,152,116],
   25:[238,196,74],26:[96,226,220],27:[28,22,42],28:[248,222,132],29:[88,142,58],
-  42:[145,112,76],43:[122,82,47],44:[154,108,59],45:[250,193,76],46:[158,112,59],47:[125,79,42],48:[175,130,73],49:[109,67,38],50:[158,112,59],51:[170,134,80],
-  52:[154,108,59],53:[128,129,132],54:[154,108,59],55:[128,129,132],56:[154,108,59],57:[122,82,47],58:[250,193,76],59:[110,110,112]
+  42:[145,112,76],43:[122,82,47],44:[154,108,59],45:[250,193,76],46:[158,112,59],47:[125,79,42],48:[175,130,73],49:[109,67,38],50:[158,112,59],51:[170,134,80]
 };
 function serverMapRGB(column,id){
   if(id===20) return [55,125,215];
@@ -1280,11 +1268,11 @@ function serverTopAt(x,z){
     const key=`${bx},${y},${bz}`, edit=world.edits?.[key];
     if(edit!==undefined){
       const id=Number(edit);
-      if(id>0&&id!==20&&id!==21&&!(id===44&&serverDoorOpenAt(key))){ top=y; break; }
+      if(id>0&&id!==20&&id!==21&&!(id===44&&world.doors[key]===true)){ top=y; break; }
       continue;
     }
     const id=serverBaseBlockAt(bx,y,bz);
-    if(id>0&&id!==20&&id!==21&&!(id===44&&serverDoorOpenAt(key))){ top=y; break; }
+    if(id>0&&id!==20&&id!==21&&!(id===44&&world.doors[key]===true)){ top=y; break; }
   }
   serverTopCache.set(column,top); return top;
 }
@@ -1293,77 +1281,16 @@ function serverBlockIdAt(x,y,z){
   const key=`${x},${y},${z}`,edit=world.edits?.[key];
   return edit===undefined?serverBaseBlockAt(x,y,z):Number(edit)||0;
 }
-const VALID_BLOCK_FACINGS=new Set(['north','south','east','west']);
-function normalizeBlockState(id,state={}){
-  const source=state&&typeof state==='object'?state:{},shape=String(BLOCK_SHAPES[id]||'full'),out={};
-  if(['door','stair','trapdoor','fence_gate'].includes(shape)) out.facing=VALID_BLOCK_FACINGS.has(source.facing)?source.facing:'north';
-  if(['door','trapdoor','fence_gate'].includes(shape)) out.open=source.open===true;
-  if(shape==='door') out.hinge=source.hinge==='right'?'right':'left';
-  if(['slab','stair','trapdoor'].includes(shape)) out.upsideDown=source.upsideDown===true;
-  return out;
+function serverSolidAt(x,y,z){
+  x=Math.floor(x); y=Math.floor(y); z=Math.floor(z); if(y<0||y>=WORLD_HEIGHT) return false;
+  const key=`${x},${y},${z}`,id=serverBlockIdAt(x,y,z);
+  if(id===0||id===20||id===21) return false;
+  return !(id===44&&world.doors[key]===true);
 }
-function serverBlockStateAt(x,y,z){
-  const bx=Math.floor(x),by=Math.floor(y),bz=Math.floor(z),raw=world.blockStates?.[editKey(bx,by,bz)];
-  return normalizeBlockState(serverBlockIdAt(bx,by,bz),raw||{});
-}
-function serverDoorOpenAt(key){ return world.doors?.[key]===true || serverBlockStateAt(...key.split(',').map(Number)).open===true; }
-function blockStatesPayload(){
-  const out={};
-  for(const [key,state] of Object.entries(world.blockStates||{})){
-    const parts=key.split(',').map(Number); if(parts.length!==3||!parts.every(Number.isInteger)) continue;
-    const id=serverBlockIdAt(parts[0],parts[1],parts[2]); if(id>0) out[key]=normalizeBlockState(id,state);
-  }
-  return out;
-}
-function serverDoorGroup(x,y,z){
-  if(serverBlockIdAt(x,y,z)!==44) return [];
-  const members=[],bx=Math.floor(x),bz=Math.floor(z); let bottom=Math.floor(y),top=Math.floor(y);
-  while(serverBlockIdAt(bx,bottom-1,bz)===44) bottom--;
-  while(serverBlockIdAt(bx,top+1,bz)===44) top++;
-  for(let gy=bottom;gy<=top;gy++) members.push({x:bx,y:gy,z:bz,key:editKey(bx,gy,bz)});
-  return members;
-}
-function serverLocalShapeBoxes(id,state={}){
-  const shape=String(BLOCK_SHAPES[id]||'full');
-  if(id===44||shape==='door'){
-    if(state.open===true){
-      if(state.facing==='north'||state.facing==='south') return state.hinge==='left'?[[0,0,0,.12,1,1]]:[[.88,0,0,1,1,1]];
-      return state.hinge==='left'?[[0,0,0,1,1,.12]]:[[0,0,.88,1,1,1]];
-    }
-    return state.facing==='north'||state.facing==='south'?[[0,0,.44,1,1,.56]]:[[.44,0,0,.56,1,1]];
-  }
-  if(shape==='slab') return [[0,state.upsideDown ? .5 : 0,0,1,state.upsideDown?1:.5,1]];
-  if(shape==='stair'){
-    const upper=state.upsideDown?0:.5,top=state.upsideDown ? .5 : 1,lower=[0,state.upsideDown ? .5 : 0,0,1,state.upsideDown?1:.5,1],facing=state.facing||'north';
-    const high=facing==='north'?[0,upper,.5,1,top,1]:facing==='south'?[0,upper,0,1,top,.5]:facing==='east'?[0,upper,0,.5,top,1]:[.5,upper,0,1,top,1];
-    return [lower,high];
-  }
-  if(shape==='fence'||shape==='fence_gate') return shape==='fence_gate'&&state.open===true?[[.375,0,.375,.625,1,.625]]:[[.375,0,.375,.625,1,.625],[0,.3,.4,1,.48,.6],[0,.65,.4,1,.83,.6]];
-  if(shape==='torch') return [[.42,0,.42,.58,.7,.58]];
-  if(shape==='lantern') return [[.25,.15,.25,.75,.85,.75]];
-  if(shape==='trapdoor') return state.open===true?[[0,0,.38,1,1,.62]]:[[0,state.upsideDown?0:.82,0,1,state.upsideDown ? .18 : 1,1]];
-  if(id===0||id===20||id===21) return [];
-  return [[0,0,0,1,1,1]];
-}
-function serverBlockCollisionBoxes(x,y,z){
-  x=Math.floor(x);y=Math.floor(y);z=Math.floor(z);const id=serverBlockIdAt(x,y,z);
-  if(id===0||id===20||id===21) return [];
-  const state={...serverBlockStateAt(x,y,z)};
-  if(id===44&&serverDoorOpenAt(`${x},${y},${z}`)) state.open=true;
-  return serverLocalShapeBoxes(id,state).map(box=>[x+box[0],y+box[1],z+box[2],x+box[3],y+box[4],z+box[5]]);
-}
-function serverSolidAt(x,y,z){ return serverBlockCollisionBoxes(x,y,z).length>0; }
 function serverWalkHeight(x,z){
-  const bx=Math.floor(x),bz=Math.floor(z),lx=x-bx,lz=z-bz;
-  for(let y=WORLD_HEIGHT-1;y>=0;y--){
-    const id=serverBlockIdAt(bx,y,bz),key=editKey(bx,y,bz);
-    if(id===0||id===20||id===21||(id===44&&serverDoorOpenAt(key))) continue;
-    const boxes=serverLocalShapeBoxes(id,{...serverBlockStateAt(bx,y,bz),open:id===44&&serverDoorOpenAt(key)});
-    let surface=-Infinity;
-    for(const box of boxes) if(lx>=box[0]&&lx<=box[3]&&lz>=box[2]&&lz<=box[5]) surface=Math.max(surface,y+box[4]);
-    if(surface>-Infinity && !serverPlayerCollides(x,surface,z)) return surface;
-  }
-  return null;
+  const top=serverTopAt(x,z), foot=top+1;
+  if(serverSolidAt(x,foot,z)||serverSolidAt(x,foot+1,z)) return null;
+  return top;
 }
 
 function playerClaim(playerId) {
@@ -1597,9 +1524,9 @@ const ANALYZER_BLOCK_NAMES=Object.freeze({
   11:'Oak Planks',12:'Dark Oak Planks',13:'Bricks',14:'Stone Bricks',15:'Mossy Cobblestone',16:'Sandstone',17:'Snow Block',18:'Ice',19:'Glass',20:'Water',21:'Lava',
   22:'Bedrock',23:'Coal Ore',24:'Iron Ore',25:'Gold Ore',26:'Diamond Ore',27:'Obsidian',28:'Glowstone',29:'Cactus',30:'Crafting Table',31:'TNT',32:'Quartz Block',
   33:'Block of Iron',34:'Block of Gold',35:'Block of Diamond',36:'White Wool',37:'Red Wool',38:'Blue Wool',39:'Yellow Wool',40:'Green Wool',41:'Black Wool',42:'Dirt Path',
-  43:'Wood Fence',44:'Wooden Door',45:'Lantern',46:'Crate',47:'Barrel',48:'Sign',49:'Bookshelf',50:'Chest',51:'Table',52:'Oak Slab',53:'Stone Slab',54:'Oak Stairs',55:'Stone Stairs',56:'Oak Trapdoor',57:'Oak Fence Gate',58:'Torch',59:'Stone Wall'
+  43:'Wood Fence',44:'Wooden Door',45:'Lantern',46:'Crate',47:'Barrel',48:'Sign',49:'Bookshelf',50:'Chest',51:'Table'
 });
-const ANALYZER_BLOCK_VALUES=Object.freeze({1:2,2:2,3:4,4:5,5:2,6:2,7:8,8:3,9:9,10:3,11:8,12:10,13:12,14:12,15:9,16:9,17:3,18:4,19:12,20:0,21:0,22:0,23:14,24:18,25:24,26:40,27:32,28:26,29:3,30:20,31:3,32:24,33:36,34:48,35:72,36:5,37:5,38:5,39:5,40:5,41:5,42:5,43:7,44:18,45:22,46:14,47:15,48:8,49:18,50:22,51:16,52:8,53:10,54:12,55:14,56:8,57:9,58:2,59:10});
+const ANALYZER_BLOCK_VALUES=Object.freeze({1:2,2:2,3:4,4:5,5:2,6:2,7:8,8:3,9:9,10:3,11:8,12:10,13:12,14:12,15:9,16:9,17:3,18:4,19:12,20:0,21:0,22:0,23:14,24:18,25:24,26:40,27:32,28:26,29:3,30:20,31:3,32:24,33:36,34:48,35:72,36:5,37:5,38:5,39:5,40:5,41:5,42:5,43:7,44:18,45:22,46:14,47:15,48:8,49:18,50:22,51:16});
 const ANALYZER_OBJECT_IDS=Object.freeze(new Set([28,29,30,31,42,43,44,45,46,47,48,49,50,51]));
 function analyzerRoundCoin(value){ return Math.max(0,Math.round(Number(value||0)/50)*50); }
 function analyzerBlockName(id){ return ANALYZER_BLOCK_NAMES[id]||`Block ${id}`; }
@@ -1608,7 +1535,7 @@ function analyzerSolidAt(editMap,x,y,z){
   if(y<0||y>=WORLD_HEIGHT) return false;
   const key=`${x},${y},${z}`,id=editMap.has(key)?Number(editMap.get(key)):serverBaseBlockAt(x,y,z);
   if(id===0||id===20||id===21) return false;
-  return !(id===44&&serverDoorOpenAt(key));
+  return !(id===44&&world.doors[key]===true);
 }
 function analyzerAirRoomCount(editMap,bounds,floorY){
   const y=floorY+1; if(y>=WORLD_HEIGHT) return 0;
@@ -2190,13 +2117,12 @@ function serverEnemyGroundAt(x,z){
   for(let r=0;r<=3;r++) for(let dz=-r;dz<=r;dz++) for(let dx=-r;dx<=r;dx++){
     if(Math.max(Math.abs(dx),Math.abs(dz))!==r) continue;
     const top=serverWalkHeight(bx+dx+.5,bz+dz+.5);
-    if(top!==null) return {x:bx+dx+.5,z:bz+dz+.5,y:top+0.02};
+    if(top!==null) return {x:bx+dx+.5,z:bz+dz+.5,y:top+1.02};
   }
-  const fallback=serverWalkHeight(x,z);
-  return {x,z,y:(fallback===null?serverTopAt(x,z)+1:fallback)+0.02};
+  return {x,z,y:serverTopAt(x,z)+1.02};
 }
 function serverEnemyPath(entity,target){
-  const sx=Math.floor(entity.x),sz=Math.floor(entity.z),gx=Math.floor(target.x),gz=Math.floor(target.z),startTop=serverWalkHeight(entity.x,entity.z);
+  const sx=Math.floor(entity.x),sz=Math.floor(entity.z),gx=Math.floor(target.x),gz=Math.floor(target.z),startTop=serverTopAt(sx,sz);
   if(Math.abs(gx-sx)>64||Math.abs(gz-sz)>64) return [];
   const minX=Math.min(sx,gx)-8,maxX=Math.max(sx,gx)+8,minZ=Math.min(sz,gz)-8,maxZ=Math.max(sz,gz)+8;
   const key=(x,z)=>x+','+z, startKey=key(sx,sz), goalKey=key(gx,gz), open=[{x:sx,z:sz,g:0,f:Math.hypot(gx-sx,gz-sz)}], came=new Map(), best=new Map([[startKey,0]]), closed=new Set();
@@ -2205,7 +2131,7 @@ function serverEnemyPath(entity,target){
     open.sort((a,b)=>a.f-b.f); const current=open.shift(), ck=current.x+','+current.z;
     if(closed.has(ck)) continue; closed.add(ck);
     if(ck===goalKey){found=current;break;}
-    const currentTop=serverWalkHeight(current.x+.5,current.z+.5);
+    const currentTop=serverTopAt(current.x,current.z);
     for(const [dx,dz] of [[1,0],[-1,0],[0,1],[0,-1]]){
       const nx=current.x+dx,nz=current.z+dz,nk=key(nx,nz); if(nx<minX||nx>maxX||nz<minZ||nz>maxZ||closed.has(nk)) continue;
       const nt=serverWalkHeight(nx,nz); if(nt===null||Math.abs(nt-currentTop)>1) continue;
@@ -2214,7 +2140,7 @@ function serverEnemyPath(entity,target){
     }
   }
   if(!found) return [];
-  const cells=[]; let cursor=goalKey; while(cursor!==startKey){ const [x,z]=cursor.split(',').map(Number); cells.push({x:x+.5,z:z+.5,y:serverWalkHeight(x+.5,z+.5)+0.02}); cursor=came.get(cursor); if(!cursor) return []; }
+  const cells=[]; let cursor=goalKey; while(cursor!==startKey){ const [x,z]=cursor.split(',').map(Number); cells.push({x:x+.5,z:z+.5,y:serverTopAt(x,z)+1.02}); cursor=came.get(cursor); if(!cursor) return []; }
   cells.reverse(); return cells;
 }
 function serverHasLineOfSight(entity,target){
@@ -2303,9 +2229,7 @@ function worldState(forClient=null) {
       landRegistry: {parcelSize:PARCEL_SIZE,basePrice:BASE_LAND_PRICE,currency:'Coin'},
       revision: world.revision,
       physics: PHYSICS_CONFIG,
-      blockRegistry: {version: BLOCK_CONTRACT.version, maxId: MAX_BLOCK_ID},
       edits: world.edits,
-      blockStates: blockStatesPayload(),
       doors: world.doors,
       lights: world.lights
     }
@@ -2330,9 +2254,7 @@ function validBlockEdit(client, x, y, z) {
 function serverPlayerCollides(px,py,pz){
   const half=PHYSICS_CONFIG.player.halfWidth,height=PHYSICS_CONFIG.player.height;
   const x0=Math.floor(px-half),x1=Math.floor(px+half),y0=Math.floor(py),y1=Math.floor(py+height-.001),z0=Math.floor(pz-half),z1=Math.floor(pz+half);
-  for(let y=y0;y<=y1;y++) for(let z=z0;z<=z1;z++) for(let x=x0;x<=x1;x++){
-    for(const box of serverBlockCollisionBoxes(x,y,z)) if(px+half>box[0]&&px-half<box[3]&&py+height>box[1]&&py<box[4]&&pz+half>box[2]&&pz-half<box[5]) return true;
-  }
+  for(let y=y0;y<=y1;y++) for(let z=z0;z<=z1;z++) for(let x=x0;x<=x1;x++) if(serverSolidAt(x,y,z)) return true;
   return false;
 }
 function serverMotionPathClear(ax,ay,az,bx,by,bz){
@@ -2408,7 +2330,7 @@ function rejectPermission(ws,x,y,z,access) {
   send(ws,{type:'permissionRejected',reason:access.reason||'no_permission',x,y,z,message:access.reason==='claim_required'?'Build, Break and private Use require a Claim':access.reason==='property_locked'?'Property is locked while listed on the market':access.reason==='construction_locked'?'Claim is locked while an NPC construction contract is active':'You do not have permission for this Claim'});
 }
 
-function commitEdit(client, x, y, z, id, oldId = null, state = null) {
+function commitEdit(client, x, y, z, id, oldId = null) {
   const key = editKey(x, y, z),currentId=serverBlockIdAt(x,y,z);
   if(oldId!==null&&currentId!==Number(oldId)){
     send(client.ws,{type:'editRejected',reason:'block_changed',x,y,z});
@@ -2422,25 +2344,13 @@ function commitEdit(client, x, y, z, id, oldId = null, state = null) {
     return false;
   }
   world.edits[key] = id;
-  if(id===0) delete world.blockStates[key]; else world.blockStates[key]=normalizeBlockState(id,state);
   world.revision += 1;
-  broadcast({ type: 'blockUpdate', x, y, z, id, state: id===0?null:world.blockStates[key], revision: world.revision, by: client.id });
+  broadcast({ type: 'blockUpdate', x, y, z, id, revision: world.revision, by: client.id });
   const editedClaim=world.claims.find(claim=>claimContainsPoint(claim,x+.5,z+.5));
   if(editedClaim){
     const ownerClient=Array.from(clients.values()).find(other=>other.joined&&other.playerId===editedClaim.ownerId);
     if(ownerClient) send(ownerClient.ws,propertyReportMessage(editedClaim));
   }
-  return true;
-}
-
-function commitDoorPlace(client,x,y,z,state={}){
-  const topY=y+1,first=editKey(x,y,z),second=editKey(x,topY,z),bottomId=serverBlockIdAt(x,y,z),topId=serverBlockIdAt(x,topY,z);
-  if(topY>=WORLD_HEIGHT||bottomId!==0||topId!==0) return send(client.ws,{type:'editRejected',reason:'block_occupied',x,y,z});
-  const baseState=normalizeBlockState(44,state),topState=normalizeBlockState(44,{...baseState});
-  world.edits[first]=44;world.edits[second]=44;world.blockStates[first]=baseState;world.blockStates[second]=topState;world.revision+=1;
-  broadcast({type:'blockUpdate',x,y,z,id:44,state:baseState,revision:world.revision,by:client.id});
-  broadcast({type:'blockUpdate',x,y:topY,z,id:44,state:topState,revision:world.revision,by:client.id});
-  saveWorld();
   return true;
 }
 
@@ -2783,8 +2693,7 @@ wss.on('connection', (ws, req) => {
     playerId: null,
     sessionId: id,
     maxPlayers: MAX_PLAYERS,
-    physics: PHYSICS_CONFIG,
-    blockRegistry: {version: BLOCK_CONTRACT.version, maxId: MAX_BLOCK_ID}
+    physics: PHYSICS_CONFIG
   });
 
   ws.on('message', raw => {
@@ -2816,7 +2725,7 @@ wss.on('connection', (ws, req) => {
       client.fly=false; client.sprint=false; client.inWater=false; client.onGround=false; client.jump=false; client.lastStateAt=Date.now();
       client.joined = true;
       client.mode = world.mode;
-      send(ws, { type: 'joined', playerId: client.playerId, username:client.username, name: client.name, accountCreated:auth.created, sessionToken:issueRememberedSession(auth.account), freeClaimAvailable:resolved.profile.hasClaimedFree!==true, health:client.health, maxHealth:100, spawn:client.spawn, spawnArea:spawnAreaSummary(), physics:PHYSICS_CONFIG, blockRegistry:{version:BLOCK_CONTRACT.version,maxId:MAX_BLOCK_ID}, claim:claimDetails(playerClaim(client.playerId),client.playerId), claims:claimsSummary() });
+      send(ws, { type: 'joined', playerId: client.playerId, username:client.username, name: client.name, accountCreated:auth.created, sessionToken:issueRememberedSession(auth.account), freeClaimAvailable:resolved.profile.hasClaimedFree!==true, health:client.health, maxHealth:100, spawn:client.spawn, spawnArea:spawnAreaSummary(), physics:PHYSICS_CONFIG, claim:claimDetails(playerClaim(client.playerId),client.playerId), claims:claimsSummary() });
       send(ws,{type:'storeCatalog',currency:'Coin',prefabs:prefabCatalogPayload(),allPaid:true});
       send(ws,propertyReportMessage(playerClaim(client.playerId)));
       send(ws,{type:'walletUpdate',wallet:walletSnapshot(client.playerId)});
@@ -3119,32 +3028,16 @@ function purchaseNpcClaim(client,result){
       return;
     }
 
-    if (message.type === 'blockStateToggle') {
-      const x=integer(message.x,NaN),y=integer(message.y,NaN),z=integer(message.z,NaN);
-      if(!validBlockEdit(client,x,y,z)) return send(ws,{type:'editRejected',reason:'too_far_or_invalid',x,y,z});
-      const access=claimAccess(client,x,z,'use');if(!access.ok)return rejectPermission(ws,x,y,z,access);
-      const key=editKey(x,y,z),id=serverBlockIdAt(x,y,z),shape=String(BLOCK_SHAPES[id]||'');
-      if(!['trapdoor','fence_gate'].includes(shape)) return send(ws,{type:'editRejected',reason:'object_not_found',x,y,z});
-      const next=normalizeBlockState(id,{...serverBlockStateAt(x,y,z),open:serverBlockStateAt(x,y,z).open!==true});
-      world.blockStates[key]=next;world.revision+=1;saveWorld();
-      broadcast({type:'blockUpdate',x,y,z,id,state:next,revision:world.revision,by:client.id});return;
-    }
     if (message.type === 'doorToggle' || message.type === 'lightToggle') {
       const x=integer(message.x,NaN), y=integer(message.y,NaN), z=integer(message.z,NaN);
       if(!validBlockEdit(client,x,y,z)) return send(ws,{type:'editRejected',reason:'too_far_or_invalid',x,y,z});
       const access=claimAccess(client,x,z,'use'); if(!access.ok) return rejectPermission(ws,x,y,z,access);
       const key=editKey(x,y,z);
       if(message.type==='doorToggle'){
-        const group=serverDoorGroup(x,y,z); if(!group.length) return send(ws,{type:'editRejected',reason:'object_not_found',x,y,z});
-        const open=!serverDoorOpenAt(key);
-        for(const member of group){
-          if(open) world.doors[member.key]=true; else delete world.doors[member.key];
-          const id=serverBlockIdAt(member.x,member.y,member.z);
-          world.blockStates[member.key]=normalizeBlockState(id,{...serverBlockStateAt(member.x,member.y,member.z),open});
-        }
-        world.revision+=1; const groupPayload=group.map(member=>({x:member.x,y:member.y,z:member.z}));
-        broadcast({type:'doorState',x,y,z,open,group:groupPayload,revision:world.revision,by:client.id});
-        saveWorld();
+        const open=world.doors[key]!==true;
+        if(open) world.doors[key]=true; else delete world.doors[key];
+        world.revision+=1;
+        broadcast({type:'doorState',x,y,z,open,revision:world.revision,by:client.id});
       }else{
         const on=world.lights[key]!==false;
         const nextOn=!on;
@@ -3170,12 +3063,6 @@ function purchaseNpcClaim(client,result){
       return;
     }
 
-    if (message.type === 'doorPlace') {
-      const x=integer(message.x,NaN),y=integer(message.y,NaN),z=integer(message.z,NaN);
-      if(!validBlockEdit(client,x,y,z)) return send(ws,{type:'editRejected',reason:'too_far_or_invalid',x,y,z});
-      const access=claimAccess(client,x,z,'build');if(!access.ok)return rejectPermission(ws,x,y,z,access);
-      return commitDoorPlace(client,x,y,z,message.state||{});
-    }
     if (message.type === 'blockBreak' || message.type === 'blockPlace') {
       const x = integer(message.x, NaN), y = integer(message.y, NaN), z = integer(message.z, NaN);
       if (!validBlockEdit(client, x, y, z)) return send(ws, { type: 'editRejected', reason: 'too_far_or_invalid', x, y, z });
@@ -3184,8 +3071,8 @@ function purchaseNpcClaim(client,result){
         commitEdit(client, x, y, z, 0, message.oldId === undefined ? null : integer(message.oldId, -1));
       } else {
         const idValue = integer(message.id, 0);
-        if (idValue <= 0 || idValue > MAX_BLOCK_ID || idValue === 22 || idValue === 44 || !BLOCK_CONTRACT.ids || !Object.values(BLOCK_CONTRACT.ids).includes(idValue)) return send(ws, { type: 'editRejected', reason: idValue===44?'door_requires_pair':'invalid_block', x, y, z });
-        commitEdit(client, x, y, z, idValue, message.oldId === undefined ? null : integer(message.oldId, -1), message.state||null);
+        if (idValue <= 0 || idValue > MAX_BLOCK_ID || idValue === 22) return send(ws, { type: 'editRejected', reason: 'invalid_block', x, y, z });
+        commitEdit(client, x, y, z, idValue, message.oldId === undefined ? null : integer(message.oldId, -1));
       }
       return;
     }

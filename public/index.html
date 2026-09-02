@@ -303,7 +303,6 @@
   #menu .serverAuthNote { color:#9bf0a4; }
 </style>
 <script>window.__SERVER_DEPLOYMENT__=true;</script>
-<script>window.__VOXELCRAFT_BLOCK_CONTRACT__={"version":1,"ids":{"grass":1,"dirt":2,"stone":3,"cobble":4,"sand":5,"gravel":6,"log":7,"leaves":8,"spruce_log":9,"spruce_leaves":10,"planks":11,"planks_dark":12,"bricks":13,"stone_bricks":14,"mossy":15,"sandstone":16,"snow":17,"ice":18,"glass":19,"water":20,"lava":21,"bedrock":22,"coal_ore":23,"iron_ore":24,"gold_ore":25,"diamond_ore":26,"obsidian":27,"glowstone":28,"cactus":29,"crafting":30,"tnt":31,"quartz":32,"iron_block":33,"gold_block":34,"diamond_block":35,"wool_white":36,"wool_red":37,"wool_blue":38,"wool_yellow":39,"wool_green":40,"wool_black":41,"path":42,"wood_fence":43,"door":44,"lantern":45,"crate":46,"barrel":47,"sign":48,"bookshelf":49,"chest":50,"table":51,"oak_slab":52,"stone_slab":53,"oak_stairs":54,"stone_stairs":55,"trapdoor":56,"fence_gate":57,"torch":58,"stone_wall":59},"shapes":{"full":{"collision":"full"},"door":{"collision":"door","state":["facing","hinge","open"]},"slab":{"collision":"slab","state":["upsideDown"]},"stair":{"collision":"stair","state":["facing","upsideDown"]},"fence":{"collision":"fence"},"trapdoor":{"collision":"trapdoor","state":["facing","open","upsideDown"]},"fence_gate":{"collision":"fence_gate","state":["facing","open"]},"torch":{"collision":"torch"},"lantern":{"collision":"lantern"}},"blockShapes":{"43":"fence","44":"door","45":"lantern","52":"slab","53":"slab","54":"stair","55":"stair","56":"trapdoor","57":"fence_gate","58":"torch","59":"fence"}};</script>
 </head>
 <body>
 <div id="app"></div>
@@ -862,22 +861,12 @@ function makeCloudTexture(){
 /* =========================================================
    3. BLOCK REGISTRY
    ========================================================= */
-// tiles: [top, side, bottom]. The generated deployment injects the canonical
-// shared/block-registry.json contract; the fallback keeps the standalone client
-// source usable during local development.
-const BLOCK_CONTRACT = window.__VOXELCRAFT_BLOCK_CONTRACT__ || Object.freeze({
-  version:1,
-  ids:{oak_slab:52,stone_slab:53,oak_stairs:54,stone_stairs:55,trapdoor:56,fence_gate:57,torch:58,stone_wall:59},
-  blockShapes:{43:'fence',44:'door',45:'lantern',52:'slab',53:'slab',54:'stair',55:'stair',56:'trapdoor',57:'fence_gate',58:'torch',59:'fence'}
-});
+// tiles: [top, side, bottom]
 const BLOCKS = [null];
 const BID = {};
 function reg(key,name,tiles,opt={}){
-  const contractId=BLOCK_CONTRACT.ids?.[key];
-  const id=contractId===undefined?BLOCKS.length:Number(contractId);
-  if(id!==BLOCKS.length) throw new Error(`Block registry mismatch for ${key}: expected ${BLOCKS.length}, contract has ${id}`);
-  const shape=opt.shape||BLOCK_CONTRACT.blockShapes?.[id]||'full';
-  BLOCKS.push({ id, key, name, tiles, shape, transparent:!!opt.transparent, liquid:!!opt.liquid, emit:!!opt.emit, unbreakable:!!opt.unbreakable, hardness:opt.hardness||1 });
+  const id=BLOCKS.length;
+  BLOCKS.push({ id, key, name, tiles, transparent:!!opt.transparent, liquid:!!opt.liquid, emit:!!opt.emit, unbreakable:!!opt.unbreakable, hardness:opt.hardness||1 });
   BID[key]=id; return id;
 }
 reg('grass','Grass Block',[T.grass_top,T.grass_side,T.dirt]);
@@ -922,88 +911,22 @@ reg('wool_yellow','Yellow Wool',[T.wool_yellow,T.wool_yellow,T.wool_yellow],{har
 reg('wool_green','Green Wool',[T.wool_green,T.wool_green,T.wool_green],{hardness:0.5});
 reg('wool_black','Black Wool',[T.wool_black,T.wool_black,T.wool_black],{hardness:0.5});
 reg('path','Dirt Path',[T.path,T.path,T.dirt],{hardness:0.8});
-reg('wood_fence','Wood Fence',[T.wood_fence,T.wood_fence,T.wood_fence],{shape:'fence',hardness:1.0});
-reg('door','Wooden Door',[T.door,T.door,T.door],{shape:'door',hardness:1.0});
-reg('lantern','Lantern',[T.lantern,T.lantern,T.lantern],{shape:'lantern',transparent:true,emit:true,hardness:0.4});
+reg('wood_fence','Wood Fence',[T.wood_fence,T.wood_fence,T.wood_fence],{hardness:1.0});
+reg('door','Wooden Door',[T.door,T.door,T.door],{hardness:1.0});
+reg('lantern','Lantern',[T.lantern,T.lantern,T.lantern],{emit:true,hardness:0.4});
 reg('crate','Crate',[T.crate,T.crate,T.crate],{hardness:0.8});
 reg('barrel','Barrel',[T.barrel,T.barrel,T.barrel],{hardness:1.0});
 reg('sign','Sign',[T.sign,T.sign,T.sign],{hardness:0.5});
 reg('bookshelf','Bookshelf',[T.bookshelf,T.bookshelf,T.bookshelf],{hardness:1.2});
 reg('chest','Chest',[T.crate,T.crate,T.crate],{hardness:1.0});
 reg('table','Table',[T.planks_oak,T.planks_oak,T.planks_oak],{hardness:1.0});
-reg('oak_slab','Oak Slab',[T.planks_oak,T.planks_oak,T.planks_oak],{shape:'slab',hardness:1.2});
-reg('stone_slab','Stone Slab',[T.stone,T.stone,T.stone],{shape:'slab',hardness:1.6});
-reg('oak_stairs','Oak Stairs',[T.planks_oak,T.planks_oak,T.planks_oak],{shape:'stair',hardness:1.2});
-reg('stone_stairs','Stone Stairs',[T.stone,T.stone,T.stone],{shape:'stair',hardness:1.6});
-reg('trapdoor','Oak Trapdoor',[T.planks_oak,T.planks_oak,T.planks_oak],{shape:'trapdoor',hardness:1.0});
-reg('fence_gate','Oak Fence Gate',[T.planks_oak,T.planks_oak,T.planks_oak],{shape:'fence_gate',hardness:1.0});
-reg('torch','Torch',[T.lantern,T.lantern,T.lantern],{shape:'torch',transparent:true,emit:true,hardness:0.1});
-reg('stone_wall','Stone Wall',[T.stone,T.stone,T.stone],{shape:'fence',hardness:1.6});
 
 const AIR=0, ID_WATER=BID.water, ID_LAVA=BID.lava;
 const openDoors=new Set();
 const lanternOff=new Set();
-const blockStates=new Map();
-const doorAnimations=new Map();
-let doorAnimationFrame=0;
 const voxelKey=(x,y,z)=>`${Math.floor(x)},${Math.floor(y)},${Math.floor(z)}`;
-const isOpaque = id => id!==AIR && !!BLOCKS[id] && !BLOCKS[id].transparent;
-const isSolidBlock = id => id!==AIR && !!BLOCKS[id] && !BLOCKS[id].liquid;
-const VALID_FACINGS=new Set(['north','south','east','west']);
-function normalizeBlockState(id,state={}){
-  const source=state&&typeof state==='object'?state:{};
-  const out={};
-  if(BLOCKS[id]?.shape==='door'||BLOCKS[id]?.shape==='stair'||BLOCKS[id]?.shape==='trapdoor'||BLOCKS[id]?.shape==='fence_gate'){
-    out.facing=VALID_FACINGS.has(source.facing)?source.facing:'north';
-  }
-  if(BLOCKS[id]?.shape==='door'||BLOCKS[id]?.shape==='trapdoor'||BLOCKS[id]?.shape==='fence_gate') out.open=source.open===true;
-  if(BLOCKS[id]?.shape==='door') out.hinge=source.hinge==='right'?'right':'left';
-  if(BLOCKS[id]?.shape==='slab'||BLOCKS[id]?.shape==='stair'||BLOCKS[id]?.shape==='trapdoor') out.upsideDown=source.upsideDown===true;
-  return out;
-}
-function blockStateAt(x,y,z){
-  const state=blockStates.get(voxelKey(x,y,z));
-  return state||{};
-}
-function renderBlockState(x,y,z,id){
-  const key=voxelKey(x,y,z),state={...blockStateAt(x,y,z)};
-  if(id===BID.door && openDoors.has(key)) state.open=true;
-  const normalized=normalizeBlockState(id,state),animation=doorAnimations.get(key);
-  if(animation&&id===BID.door){
-    const progress=clamp((performance.now()-animation.started)/animation.duration,0,1);
-    normalized.open=animation.to===1; normalized.openFraction=animation.from+(animation.to-animation.from)*(progress*progress*(3-2*progress));
-  }
-  return normalized;
-}
-function setStoredBlockState(x,y,z,id,state){
-  const key=voxelKey(x,y,z),normalized=normalizeBlockState(id,state);
-  if(Object.keys(normalized).length) blockStates.set(key,normalized); else blockStates.delete(key);
-}
-function doorPanelBox(state){
-  const facing=state.facing||'north', open=state.open===true, hinge=state.hinge||'left';
-  if(!open) return (facing==='north'||facing==='south')?[0,0,.44,1,1,.56]:[.44,0,0,.56,1,1];
-  if(facing==='north'||facing==='south') return hinge==='left'?[0,0,0,.12,1,1]:[.88,0,0,1,1,1];
-  return hinge==='left'?[0,0,0,1,1,.12]:[0,0,.88,1,1,1];
-}
-function localShapeBoxes(id,state={}){
-  const shape=BLOCKS[id]?.shape||'full';
-  if(id===BID.door||shape==='door') return [doorPanelBox({...state,open:state.open===true})];
-  if(shape==='slab') return [[0,state.upsideDown?0.5:0,0,1,state.upsideDown?1:0.5,1]];
-  if(shape==='stair'){
-    const high=state.facing||'north', lower=[0,state.upsideDown?0.5:0,0,1,state.upsideDown?1:0.5,1];
-    const upper=state.upsideDown?0:0.5, top=state.upsideDown?0.5:1;
-    const highBox=high==='north'?[0,upper,.5,1,top,1]:high==='south'?[0,upper,0,1,top,.5]:high==='east'?[0,upper,0,.5,top,1]:[.5,upper,0,1,top,1];
-    return [lower,highBox];
-  }
-  if(shape==='fence'||shape==='fence_gate'){
-    if(shape==='fence_gate'&&state.open===true) return [[0.375,0,0.375,.625,1,.625]];
-    return [[.375,0,.375,.625,1,.625],[0,.3,.4,1,.48,.6],[0,.65,.4,1,.83,.6]];
-  }
-  if(shape==='torch') return [[.42,0,.42,.58,.7,.58]];
-  if(shape==='lantern') return [[.25,.15,.25,.75,.85,.75]];
-  if(shape==='trapdoor') return state.open===true?[[0,0,.38,1,1,.62]]:[[0,state.upsideDown?0:.82,0,1,state.upsideDown ? .18 : 1,1]];
-  return [[0,0,0,1,1,1]];
-}
+const isOpaque = id => id!==AIR && !BLOCKS[id].transparent;
+const isSolidBlock = id => id!==AIR && !BLOCKS[id].liquid;
 
 /* =========================================================
    4. WORLD (chunks, generation)
@@ -1217,17 +1140,15 @@ function rebuildChunkNeighbors(cx,cz){
   }
 }
 
-function setBlock(x,y,z,id,state=null){
+function setBlock(x,y,z,id){
   if(y<1||y>=H) return false;
   const cx=Math.floor(x/CS), cz=Math.floor(z/CS);
   const c=getChunk(cx,cz,true);
-  const lx=x-cx*CS, lz=z-cz*CS, idx=(y<<8)|(lz<<4)|lx, key=voxelKey(x,y,z);
-  const nextState=normalizeBlockState(id,state||{}), previousState=blockStates.get(key);
-  if(c.data[idx]===id && JSON.stringify(previousState||{})===JSON.stringify(nextState)) return false;
+  const lx=x-cx*CS, lz=z-cz*CS, idx=(y<<8)|(lz<<4)|lx;
+  if(c.data[idx]===id) return false;
   c.data[idx]=id;
   c.mapTop=null;
-  openDoors.delete(key); lanternOff.delete(key); blockStates.delete(key); doorAnimations.delete(key);
-  if(Object.keys(nextState).length) blockStates.set(key,nextState);
+  openDoors.delete(voxelKey(x,y,z)); lanternOff.delete(voxelKey(x,y,z));
   if(c.decor){decorRoots.delete(c.decor);scene.remove(c.decor);c.decor=null;}
   markMapSnapshotsDirty(x,z);
   let ov=overrides.get(ck(cx,cz)); if(!ov){ ov=new Map(); overrides.set(ck(cx,cz),ov); }
@@ -1280,7 +1201,6 @@ const matWater  = new THREE.MeshLambertMaterial({map:waterTex, vertexColors:true
 function faceVisible(id,nid){
   if(nid===AIR) return true;
   const b=BLOCKS[nid];
-  if(!b||b.shape!=='full') return true;
   if(!b.transparent) return false;
   if(nid===id) return false;
   return true;
@@ -1347,53 +1267,6 @@ function buildChunkMesh(ch){
     else S.i.push(base,base+1,base+2, base,base+2,base+3);
   };
 
-  // Shape meshes share the atlas/material path with full cubes. They are kept
-  // as a small number of boxes instead of creating one Three.js object per
-  // voxel, so doors and stairs do not regress the chunk pipeline.
-  const pushShapeBox=(S,x,y,z,box,tiles,transform=null,emit=false)=>{
-    const minX=box[0],minY=box[1],minZ=box[2],maxX=box[3],maxY=box[4],maxZ=box[5];
-    for(let fi=0;fi<6;fi++){
-      const f=FACE_DEFS[fi],base=S.p.length/3;
-      for(let ci=0;ci<4;ci++){
-        const c=f.c[ci], lx=minX+(maxX-minX)*c[0], ly=minY+(maxY-minY)*c[1], lz=minZ+(maxZ-minZ)*c[2];
-        const p=transform?transform(lx,lz):[lx,lz];
-        S.p.push(x+p[0],y+ly,z+p[1]);
-        const n=transform?transform(f.n[0],f.n[2],true):[f.n[0],f.n[2]];
-        S.n.push(n[0],f.n[1],n[1]);
-        const tile=tiles[f.ti],tu=tile%COLS,tv=(tile/COLS)|0,u0=tu/COLS+INSET,u1=(tu+1)/COLS-INSET,v0=1-(tv+1)/ROWS+INSET,v1=1-tv/ROWS-INSET;
-        const uv=ci===0?[u0,v0]:ci===1?[u1,v0]:ci===2?[u1,v1]:[u0,v1];
-        S.u.push(uv[0],uv[1]);
-        const br=emit?1:f.l*.96; S.c.push(br,br,br);
-      }
-      S.i.push(base,base+1,base+2,base,base+2,base+3);
-    }
-  };
-  const shapeTransform=(id,state,x,z,normal=false)=>{
-    if(id!==BID.door) return [x,z];
-    const facing=state.facing||'north',hinge=state.hinge||'left',axisX=facing==='north'||facing==='south';
-    const pivot=axisX?[hinge==='left'?0:1,0]:[0,hinge==='left'?0:1];
-    const fraction=state.openFraction===undefined?(state.open===true?1:0):clamp(Number(state.openFraction)||0,0,1);
-    if(fraction<=0) return [x,z];
-    const angle=(hinge==='left'?1:-1)*(axisX?1:-1)*Math.PI/2*fraction,c=Math.cos(angle),s=Math.sin(angle);
-    if(normal) return [x*c-z*s,x*s+z*c];
-    const px=x-pivot[0],pz=z-pivot[1];
-    return [pivot[0]+px*c-pz*s,pivot[1]+px*s+pz*c];
-  };
-  const pushShape=(S,x,y,z,id,bd,state)=>{
-    const shape=bd.shape||'full';
-    if(shape==='door'){
-      const axisX=state.facing==='north'||state.facing==='south',box=axisX?[0,0,.44,1,1,.56]:[.44,0,0,.56,1,1];
-      const fraction=state.openFraction===undefined?(state.open===true?1:0):state.openFraction;
-      const transform=fraction>0.001?(lx,lz,n)=>shapeTransform(id,state,lx,lz,n):null;
-      pushShapeBox(S,x,y,z,box,bd.tiles,transform,false); return;
-    }
-    if(shape==='slab'||shape==='stair'||shape==='fence'||shape==='fence_gate'||shape==='torch'||shape==='lantern'||shape==='trapdoor'){
-      for(const box of localShapeBoxes(id,state)) pushShapeBox(S,x,y,z,box,bd.tiles,null,bd.emit===true);
-      return;
-    }
-    return false;
-  };
-
   // 1. Greedy Meshing for Water Bodies (Merged quads with continuous RepeatWrapping)
   const waterVisited = new Uint8Array(CS*CS);
   for(let y=0;y<H;y++){
@@ -1428,8 +1301,8 @@ function buildChunkMesh(ch){
     const id=data[(y<<8)|(z<<4)|x];
     if(id===AIR) continue;
     const bd=BLOCKS[id];
-    if(!bd) continue;
     const wx=ch.cx*CS+x, wz=ch.cz*CS+z;
+    if(id===BID.door && openDoors.has(voxelKey(wx,y,wz))) continue;
     if(id===ID_WATER){
       // Water sides and bottom
       for(let fi=0;fi<6;fi++){
@@ -1451,10 +1324,6 @@ function buildChunkMesh(ch){
         }
         W.i.push(base,base+1,base+2, base,base+2,base+3);
       }
-      continue;
-    }
-    if(bd.shape&&bd.shape!=='full'){
-      pushShape(bd.transparent?A:O,x,y,z,id,bd,renderBlockState(wx,y,wz,id));
       continue;
     }
     const emitsLight=bd.emit && !(id===BID.lantern && lanternOff.has(voxelKey(wx,y,wz)));
@@ -2075,24 +1944,20 @@ function isAABBColliding(px, py, pz) {
   const x0 = Math.floor(px - h + EPS), x1 = Math.floor(px + h - EPS);
   const y0 = Math.floor(py + EPS), y1 = Math.floor(py + player.height - EPS);
   const z0 = Math.floor(pz - h + EPS), z1 = Math.floor(pz + h - EPS);
-  for(let y=y0;y<=y1;y++) for(let z=z0;z<=z1;z++) for(let x=x0;x<=x1;x++){
-    const id=getBlock(x,y,z); if(!isSolidBlock(id)) continue;
-    const state=renderBlockState(x,y,z,id), px0=px-h,px1=px+h,pz0=pz-h,pz1=pz+h,py0=py,py1=py+player.height;
-    for(const box of localShapeBoxes(id,state)){
-      if(px1> x+box[0]+EPS && px0< x+box[3]-EPS && py1> y+box[1]+EPS && py0< y+box[4]-EPS && pz1> z+box[2]+EPS && pz0< z+box[5]-EPS) return true;
+
+  for (let y = y0; y <= y1; y++) {
+    for (let z = z0; z <= z1; z++) {
+      for (let x = x0; x <= x1; x++) {
+        const id = getBlock(x, y, z);
+        if (isSolidBlock(id) && !(id === BID.door && openDoors.has(voxelKey(x, y, z)))) {
+          return true;
+        }
+      }
     }
   }
   return false;
 }
 
-function collisionSurfaceAt(px,py,pz){
-  const h=player.half,x0=Math.floor(px-h),x1=Math.floor(px+h),z0=Math.floor(pz-h),z1=Math.floor(pz+h);let highest=-Infinity;
-  for(let y=Math.floor(py)-1;y<=Math.floor(py)+1;y++) for(let z=z0;z<=z1;z++) for(let x=x0;x<=x1;x++){
-    const id=getBlock(x,y,z);if(!isSolidBlock(id))continue;
-    for(const box of localShapeBoxes(id,renderBlockState(x,y,z,id))) if(px+h>x+box[0]&&px-h<x+box[3]&&pz+h>z+box[2]&&pz-h<z+box[5]&&y+box[4]<=py+EPS) highest=Math.max(highest,y+box[4]);
-  }
-  return highest;
-}
 function moveAxisPrecise(axis, amount) {
   if (Math.abs(amount) < 1e-6) return false;
   const p = player.pos;
@@ -2113,8 +1978,8 @@ function moveAxisPrecise(axis, amount) {
           const ceilingY = Math.floor(old + player.height + stepSize);
           p.y = ceilingY - player.height - EPS;
         } else {
-          const surface=collisionSurfaceAt(p.x,old+stepSize,p.z);
-          p.y=Number.isFinite(surface)?surface+EPS:Math.floor(old+stepSize)+1+EPS;
+          const floorY = Math.floor(old + stepSize);
+          p.y = floorY + 1 + EPS;
         }
       } else if (axis === 'x') {
         if (sign > 0) {
@@ -2317,17 +2182,6 @@ function raycastInteractiveProp(maxD=6.5){
   }
   return best;
 }
-function rayIntersectsLocalBox(origin,direction,x,y,z,box,tMin,tMax){
-  let near=tMin,far=tMax;
-  for(const axis of ['x','y','z']){
-    const min=(axis==='x'?x+box[0]:axis==='y'?y+box[1]:z+box[2]), max=(axis==='x'?x+box[3]:axis==='y'?y+box[4]:z+box[5]);
-    const o=origin[axis],d=direction[axis];
-    if(Math.abs(d)<1e-8){ if(o<min||o>max) return false; continue; }
-    let a=(min-o)/d,b=(max-o)/d; if(a>b){const t=a;a=b;b=t;}
-    near=Math.max(near,a); far=Math.min(far,b); if(near>far) return false;
-  }
-  return far>=Math.max(near,tMin)-1e-6;
-}
 function raycastVoxel(maxD=6.5){
   const o=camera.position.clone();
   const d=new THREE.Vector3(0,0,-1).applyQuaternion(camera.quaternion).normalize();
@@ -2340,10 +2194,9 @@ function raycastVoxel(maxD=6.5){
   let tmz=((stepZ>0? z+1-o.z : o.z-z))*tdz;
   let nx=0,ny=0,nz=0, t=0;
   for(let i=0;i<200;i++){
-    const id=getBlock(x,y,z),state=renderBlockState(x,y,z,id),nextT=Math.min(tmx,tmy,tmz);
-    if(isSolidBlock(id)&&localShapeBoxes(id,state).some(box=>rayIntersectsLocalBox(o,d,x,y,z,box,t,nextT))){
-      return {x,y,z,nx,ny,nz,id,open:id===BID.door&&state.open===true,distance:Math.max(0,t)};
-    }
+    const id=getBlock(x,y,z);
+    if(id===BID.door && openDoors.has(voxelKey(x,y,z))) return {x,y,z,nx,ny,nz,id,open:true,distance:t};
+    if(id!==AIR && !BLOCKS[id].liquid) return {x,y,z,nx,ny,nz,id,distance:t};
     if(tmx<tmy && tmx<tmz){ x+=stepX; t=tmx; tmx+=tdx; nx=-stepX; ny=0; nz=0; }
     else if(tmy<tmz){ y+=stepY; t=tmy; tmy+=tdy; nx=0; ny=-stepY; nz=0; }
     else { z+=stepZ; t=tmz; tmz+=tdz; nx=0; ny=0; nz=-stepZ; }
@@ -2362,44 +2215,9 @@ function rebuildInteractiveCell(x,y,z){
   rebuildChunkNeighbors(Math.floor(x/CS),Math.floor(z/CS));
   markMapSnapshotsDirty();
 }
-function setBlockState(x,y,z,id,state){
-  const current=getBlock(x,y,z); if(current!==id) return false;
-  setStoredBlockState(x,y,z,id,state); rebuildInteractiveCell(x,y,z); return true;
-}
-function scheduleDoorAnimation(){
-  if(doorAnimationFrame) return;
-  const frame=()=>{
-    doorAnimationFrame=0; const now=performance.now(),chunksToRebuild=new Set(),active=[];
-    for(const [key,animation] of doorAnimations){
-      if(now-animation.started>=animation.duration){ doorAnimations.delete(key); continue; }
-      active.push(key); const [x,,z]=key.split(',').map(Number); chunksToRebuild.add(ck(Math.floor(x/CS),Math.floor(z/CS)));
-    }
-    for(const chunkKey of chunksToRebuild){ const chunk=chunks.get(chunkKey); if(chunk?.built) buildChunkMesh(chunk); }
-    if(active.length) doorAnimationFrame=requestAnimationFrame(frame);
-  };
-  doorAnimationFrame=requestAnimationFrame(frame);
-}
-function localDoorGroup(x,y,z){
-  if(getBlock(x,y,z)!==BID.door) return [];
-  const result=[],bx=Math.floor(x),bz=Math.floor(z); let top=Math.floor(y),bottom=Math.floor(y);
-  while(getBlock(bx,top+1,bz)===BID.door) top++;
-  while(getBlock(bx,bottom-1,bz)===BID.door) bottom--;
-  for(let gy=bottom;gy<=top;gy++) result.push({x:bx,y:gy,z:bz});
-  return result;
-}
-function applyDoorState(x,y,z,open,group=null){
-  const members=Array.isArray(group)&&group.length?group:localDoorGroup(x,y,z);
-  if(!members.length) members.push({x,y,z});
-  for(const member of members){
-    const key=voxelKey(member.x,member.y,member.z),wasOpen=openDoors.has(key);
-    pendingOptimisticDoors.delete(key);
-    if(open!==wasOpen) doorAnimations.set(key,{from:wasOpen?1:0,to:open?1:0,started:performance.now(),duration:240});
-    if(open) openDoors.add(key); else openDoors.delete(key);
-    const id=getBlock(member.x,member.y,member.z);
-    if(id===BID.door) setStoredBlockState(member.x,member.y,member.z,id,{...blockStateAt(member.x,member.y,member.z),open});
-    rebuildInteractiveCell(member.x,member.y,member.z);
-  }
-  scheduleDoorAnimation();
+function applyDoorState(x,y,z,open){
+  const key=voxelKey(x,y,z); if(open) openDoors.add(key); else openDoors.delete(key);
+  rebuildInteractiveCell(x,y,z);
 }
 function applyLanternState(x,y,z,on){
   const key=voxelKey(x,y,z); if(on) lanternOff.delete(key); else lanternOff.add(key);
@@ -2407,12 +2225,10 @@ function applyLanternState(x,y,z,on){
 }
 const pendingOptimisticEdits=new Map();
 const pendingOptimisticDoors=new Map();
-const pendingOptimisticDoorPlacements=new Map();
 const pendingOptimisticLights=new Map();
-const pendingOptimisticStates=new Map();
-function recordOptimisticEdit(x,y,z,previousId,optimisticId,previousState=null,optimisticState=null){
+function recordOptimisticEdit(x,y,z,previousId,optimisticId){
   const k=`${x},${y},${z}`;
-  pendingOptimisticEdits.set(k,{x,y,z,previousId,optimisticId,previousState,optimisticState,time:Date.now()});
+  pendingOptimisticEdits.set(k,{x,y,z,previousId,optimisticId,time:Date.now()});
   if(pendingOptimisticEdits.size>250){
     const cutoff=Date.now()-15000;
     for(const [key,item] of pendingOptimisticEdits){ if(item.time<cutoff) pendingOptimisticEdits.delete(key); }
@@ -2420,20 +2236,12 @@ function recordOptimisticEdit(x,y,z,previousId,optimisticId,previousState=null,o
 }
 
 function toggleDoorAt(x,y,z){
-  const group=localDoorGroup(x,y,z),open=!openDoors.has(voxelKey(x,y,z));
-  applyDoorState(x,y,z,open,group); Snd.door(open); toast(open?'Door opened':'Door closed'); swing=1;
+  const open=!openDoors.has(voxelKey(x,y,z));
+  applyDoorState(x,y,z,open); Snd.door(open); toast(open?'Door opened':'Door closed'); swing=1;
   if(multiplayer.connected){
-    for(const member of group.length?group:[{x,y,z}]) pendingOptimisticDoors.set(voxelKey(member.x,member.y,member.z),{x:member.x,y:member.y,z:member.z,prev:!open,cur:open,time:Date.now()});
+    pendingOptimisticDoors.set(`${x},${y},${z}`,{x,y,z,prev:!open,cur:open,time:Date.now()});
     multiplayer.send({type:'doorToggle',x,y,z});
   }
-}
-function toggleStatefulBlockAt(x,y,z){
-  const id=getBlock(x,y,z),shape=BLOCKS[id]?.shape;
-  if(!['trapdoor','fence_gate'].includes(shape)) return;
-  const key=voxelKey(x,y,z),previous=blockStateAt(x,y,z),next={...previous,open:previous.open!==true};
-  setBlockState(x,y,z,id,next);
-  if(multiplayer.connected){ pendingOptimisticStates.set(key,{x,y,z,id,previous,next,time:Date.now()}); multiplayer.send({type:'blockStateToggle',x,y,z}); }
-  Snd.door(next.open); toast(next.open?(shape==='trapdoor'?'Trapdoor opened':'Gate opened'):(shape==='trapdoor'?'Trapdoor closed':'Gate closed')); swing=1;
 }
 function toggleLanternAt(x,y,z){
   const on=lanternOff.has(voxelKey(x,y,z));
@@ -2503,8 +2311,6 @@ function closeObjectPanel(){ $('#objectOverlay')?.classList.remove('show'); if(!
 document.getElementById('btnObjectClose')?.addEventListener('click',closeObjectPanel);
 function objectActionLabel(type){
   if(type==='door') return 'TOGGLE DOOR';
-  if(type==='trapdoor') return 'TOGGLE TRAPDOOR';
-  if(type==='fence_gate') return 'TOGGLE GATE';
   if(type==='lantern'||type==='lamp') return 'USE LIGHT';
   if(type==='sign') return 'READ SIGN';
   if(type==='bench') return 'USE BENCH';
@@ -2518,7 +2324,7 @@ function updateInteractionHint(){
     text=(isMobileDevice?'TAP':'RIGHT CLICK')+' · '+objectActionLabel(objectTarget.type)+' · '+objectTarget.label.toUpperCase();
   } else if(target){
     const key=BLOCKS[target.id]?.key;
-    if(['door','lantern','trapdoor','fence_gate','chest','crate','barrel'].includes(key)){
+    if(['door','lantern','chest','crate','barrel'].includes(key)){
       text=(isMobileDevice?'TAP':'RIGHT CLICK')+' · '+objectActionLabel(key);
     } else if(multiplayer.connected){
       const access=canEditAt(target.x,target.z,'build');
@@ -2529,19 +2335,6 @@ function updateInteractionHint(){
   }
   interactionHintEl.textContent=text; interactionHintEl.classList.toggle('show',!!text);
 }
-function placementFacing(){
-  const quarter=((Math.round(player.yaw/(Math.PI/2))%4)+4)%4;
-  return ['south','west','north','east'][quarter];
-}
-function placementState(id){
-  const shape=BLOCKS[id]?.shape;
-  if(shape==='door') return {facing:placementFacing(),hinge:'left',open:false};
-  if(shape==='stair') return {facing:placementFacing(),upsideDown:target?.ny===-1};
-  if(shape==='slab') return {upsideDown:target?.ny===-1};
-  if(shape==='trapdoor') return {facing:placementFacing(),upsideDown:target?.ny===-1,open:false};
-  if(shape==='fence_gate') return {facing:placementFacing(),open:false};
-  return null;
-}
 function tryPlace(){
   if(objectTarget){ interactWithObject(objectTarget); return; }
   if(!target) return;
@@ -2549,41 +2342,43 @@ function tryPlace(){
     interactWithObject({type:BLOCKS[target.id].key,x:target.x,y:target.y,z:target.z}); return;
   }
   if(target.id===BID.door){
-    if(multiplayer.connected){ const access=canEditAt(target.x,target.z,'use'); if(!access.ok){ toast(access.message); return; } }
+    if(multiplayer.connected){
+      const access=canEditAt(target.x,target.z,'use');
+      if(!access.ok){ toast(access.message); return; }
+    }
     toggleDoorAt(target.x,target.y,target.z); return;
   }
   if(target.id===BID.lantern){
-    if(multiplayer.connected){ const access=canEditAt(target.x,target.z,'use'); if(!access.ok){ toast(access.message); return; } }
+    if(multiplayer.connected){
+      const access=canEditAt(target.x,target.z,'use');
+      if(!access.ok){ toast(access.message); return; }
+    }
     toggleLanternAt(target.x,target.y,target.z); return;
   }
-  if(['trapdoor','fence_gate'].includes(BLOCKS[target.id]?.shape)){
-    if(multiplayer.connected){ const access=canEditAt(target.x,target.z,'use'); if(!access.ok){toast(access.message);return;} }
-    toggleStatefulBlockAt(target.x,target.y,target.z); return;
-  }
-  const nx=target.x+target.nx,ny=target.y+target.ny,nz=target.z+target.nz,placedId=hotbar[slot],state=placementState(placedId);
+  const nx=target.x+target.nx, ny=target.y+target.ny, nz=target.z+target.nz;
   if(ny<1||ny>=H) return;
   const cur=getBlock(nx,ny,nz);
-  if(cur!==AIR && !BLOCKS[cur]?.liquid) return;
-  const h=player.half,p=player.pos;
-  if(nx+1>p.x-h&&nx<p.x+h&&nz+1>p.z-h&&nz<p.z+h&&ny+1>p.y&&ny<p.y+player.height) return;
-  if(placedId===BID.door){
-    const topY=ny+1;if(topY>=H||getBlock(nx,topY,nz)!==AIR) return;
-    if(multiplayer.connected){
-      const access=canEditAt(nx,nz,'build');if(!access.ok){toast(access.message);return;}
-      const previousDoorState=blockStateAt(nx,ny,nz),previousTopState=blockStateAt(nx,topY,nz);
-      recordOptimisticEdit(nx,ny,nz,cur,placedId,previousDoorState,state);recordOptimisticEdit(nx,topY,nz,AIR,placedId,previousTopState,state);
-      setBlock(nx,ny,nz,placedId,state);setBlock(nx,topY,nz,placedId,{...state,hinge:state.hinge});
-      pendingOptimisticDoorPlacements.set(voxelKey(nx,ny,nz),[{x:nx,y:ny,z:nz,previousId:cur,previousState:previousDoorState},{x:nx,y:topY,z:nz,previousId:AIR,previousState:previousTopState}]);
-      multiplayer.send({type:'doorPlace',x:nx,y:ny,z:nz,state});
-    }else{ setBlock(nx,ny,nz,placedId,state);setBlock(nx,topY,nz,placedId,{...state}); }
-    Snd.place(placedId);swing=1;return;
-  }
+  if(cur!==AIR && !BLOCKS[cur].liquid) return;
+  // don't place inside the player
+  const h=player.half, p=player.pos;
+  if(nx+1>p.x-h && nx<p.x+h && nz+1>p.z-h && nz<p.z+h && ny+1>p.y && ny<p.y+player.height) return;
+
   if(multiplayer.connected){
-    const access=canEditAt(nx,nz,'build');if(!access.ok){toast(access.message);return;}
-    recordOptimisticEdit(nx,ny,nz,cur,placedId,blockStateAt(nx,ny,nz),state);setBlock(nx,ny,nz,placedId,state);Snd.place(placedId);swing=1;
-    multiplayer.send({type:'blockPlace',x:nx,y:ny,z:nz,id:placedId,state,oldId:cur});return;
+    const access=canEditAt(nx,nz,'build');
+    if(!access.ok){
+      toast(access.message);
+      return;
+    }
+    const placedId=hotbar[slot];
+    recordOptimisticEdit(nx,ny,nz,cur,placedId);
+    setBlock(nx,ny,nz,placedId);
+    Snd.place(placedId);
+    swing=1;
+    multiplayer.send({type:'blockPlace',x:nx,y:ny,z:nz,id:placedId,oldId:cur});
+    return;
   }
-  if(setBlock(nx,ny,nz,placedId,state)){Snd.place(placedId);swing=1;}
+  const placedId=hotbar[slot];
+  if(setBlock(nx,ny,nz,placedId)){ Snd.place(placedId); swing=1; }
 }
 function tryBreak(){
   if(!target) return;
@@ -2598,7 +2393,7 @@ function tryBreak(){
       if(mineBar) mineBar.style.display='none';
       return;
     }
-    recordOptimisticEdit(target.x,target.y,target.z,prevId,AIR,blockStateAt(target.x,target.y,target.z),null);
+    recordOptimisticEdit(target.x,target.y,target.z,prevId,AIR);
     spawnParticles(target.x,target.y,target.z,prevId);
     setBlock(target.x,target.y,target.z,AIR);
     Snd.break_(prevId);
@@ -3171,14 +2966,13 @@ function snapshotWorld(){
     if(arr.length) overridesData[k]=arr;
   });
   return {
-    format:SAVE_FORMAT, version:3, savedAt:new Date().toISOString(),
+    format:SAVE_FORMAT, version:2, savedAt:new Date().toISOString(),
     seed:SEED, dayTime, mode:player.mode, fly:player.fly,
     hotbar:[...hotbar], slot,
     player:{x:player.pos.x,y:player.pos.y,z:player.pos.z,yaw:player.yaw,pitch:player.pitch},
     spawn:{x:spawnPoint.x,y:spawnPoint.y,z:spawnPoint.z},
     doors:Object.fromEntries([...openDoors].map(key=>[key,true])),
     lights:Object.fromEntries([...lanternOff].map(key=>[key,false])),
-    blockStates:Object.fromEntries(blockStates),
     settings:{...settings}, overrides:overridesData
   };
 }
@@ -3210,7 +3004,7 @@ function applyWorldData(d){
   if(!Number.isFinite(seed)) throw new Error('World file has no valid seed');
   SEED=seed|0; initNoise();
 
-  overrides.clear(); blockStates.clear();
+  overrides.clear();
   const allOverrides=d.overrides || d.ov || {};
   for(const k in allOverrides){
     const parts=allOverrides[k];
@@ -3222,6 +3016,7 @@ function applyWorldData(d){
     }
     if(m.size) overrides.set(k,m);
   }
+
   dayTime=((finiteOr(d.dayTime,0.28)%1)+1)%1;
   player.mode=d.mode==='survival'?'survival':'creative';
   player.fly=player.mode==='creative' && !!d.fly;
@@ -3247,15 +3042,6 @@ function applyWorldData(d){
   player.yaw=finiteOr(pp.yaw,0); player.pitch=clamp(finiteOr(pp.pitch,0),-Math.PI/2+0.01,Math.PI/2-0.01);
   player.vel.set(0,0,0); player.onGround=false;
   hardReset(false); resetPlayerHealth();
-  const incomingStates=d.blockStates&&typeof d.blockStates==='object'?d.blockStates:{};
-  for(const [key,state] of Object.entries(incomingStates)){
-    const parts=key.split(',').map(Number);
-    if(parts.length===3&&parts.every(Number.isInteger)&&state&&typeof state==='object'){
-      const [x,y,z]=parts,cx=Math.floor(x/CS),cz=Math.floor(z/CS),m=overrides.get(ck(cx,cz));
-      const localIdx=(y<<8)|((z-cz*CS)<<4)|(x-cx*CS),id=m?.get(localIdx);
-      blockStates.set(key,normalizeBlockState(Number.isInteger(id)?id:AIR,state));
-    }
-  }
   Object.keys(d.doors||{}).forEach(key=>{if(d.doors[key]===true)openDoors.add(key)});
   Object.keys(d.lights||{}).forEach(key=>{if(d.lights[key]===false)lanternOff.add(key)});
   applyGraphicsQuality(settings.quality||'low',false);
@@ -3298,8 +3084,7 @@ function syncSettingsUI(){
 }
 function hardReset(newSeed=true){
   chunks.forEach(c=>disposeChunk(c));
-  chunks.clear(); openDoors.clear(); lanternOff.clear(); blockStates.clear(); doorAnimations.clear();
-  pendingOptimisticEdits.clear(); pendingOptimisticDoors.clear(); pendingOptimisticLights.clear(); pendingOptimisticDoorPlacements.clear(); pendingOptimisticStates.clear();
+  chunks.clear(); openDoors.clear(); lanternOff.clear();
   markMapSnapshotsDirty();
   if(newSeed){ overrides.clear(); player.pos.copy(findSpawn()); }
   player.vel.set(0,0,0); player.onGround=false; player.stepVisualOffset=0; player.autoStepUntil=0;
@@ -3448,15 +3233,10 @@ const multiplayer={
     if(show){ setMpStatus('OFFLINE · Singleplayer'); addMpChat('Multiplayer disconnected'); }
   },
   handle(m){
-    if(m.type==='hello'){
-      this.id=m.playerId||this.id; applyServerPhysics(m.physics);
-      if(m.blockRegistry&&Number(m.blockRegistry.maxId)!==Math.max(...Object.values(BLOCK_CONTRACT.ids||{}).map(Number))) console.warn('Block registry mismatch',m.blockRegistry,BLOCK_CONTRACT);
-      return;
-    }
+    if(m.type==='hello'){ this.id=m.playerId||this.id; applyServerPhysics(m.physics); return; }
     if(m.type==='authRejected'){ this.connected=false; this.joining=false; if(SERVER_DEPLOYMENT&&this.sessionToken)this.clearRememberedSession(); window.setServerAuthFormVisible?.(true); setMpStatus('AUTH ERROR · '+(m.message||'login failed'),true); addMpChat(m.message||'Username/password login failed'); return; }
     if(m.type==='joined'){
       applyServerPhysics(m.physics);
-      if(m.blockRegistry&&Number(m.blockRegistry.maxId)!==Math.max(...Object.values(BLOCK_CONTRACT.ids||{}).map(Number))) console.warn('Block registry mismatch',m.blockRegistry,BLOCK_CONTRACT);
       this.connected=true; this.joining=false; this.id=m.playerId||this.id; this.username=m.username||this.username; this.name=m.name||this.name; this.freeClaimAvailable=m.freeClaimAvailable!==false;
       if(SERVER_DEPLOYMENT&&m.sessionToken){ this.sessionToken=String(m.sessionToken); try{localStorage.setItem(SERVER_SESSION_STORAGE_KEY,this.sessionToken);}catch(error){} window.setServerAuthFormVisible?.(false); }
 
@@ -3561,34 +3341,26 @@ const multiplayer={
       return;
     }
     if(m.type==='entities'){ updateAmbientEntities(m.entities||[]); return; }
-    if(m.type==='doorState'){ applyDoorState(Number(m.x)||0,Number(m.y)||0,Number(m.z)||0,!!m.open,m.group||null); return; }
+    if(m.type==='doorState'){ applyDoorState(Number(m.x)||0,Number(m.y)||0,Number(m.z)||0,!!m.open); return; }
     if(m.type==='lightState'){ applyLanternState(Number(m.x)||0,Number(m.y)||0,Number(m.z)||0,!!m.on); return; }
     if(m.type==='blockUpdate'){
       if(Number.isFinite(Number(m.revision))) mapWorldRevision=Math.max(mapWorldRevision,Number(m.revision));
       if(Number.isInteger(m.x)&&Number.isInteger(m.y)&&Number.isInteger(m.z)){
         const k=`${m.x},${m.y},${m.z}`;
-        pendingOptimisticEdits.delete(k); pendingOptimisticStates.delete(k);
-        for(const [root,members] of pendingOptimisticDoorPlacements){ if(members.some(member=>voxelKey(member.x,member.y,member.z)===k)){ pendingOptimisticDoorPlacements.delete(root); break; } }
+        pendingOptimisticEdits.delete(k);
         const targetId=clamp(Number(m.id)||0,0,BLOCKS.length-1);
-        if(getBlock(m.x,m.y,m.z)!==targetId || (m.state!==undefined&&JSON.stringify(blockStateAt(m.x,m.y,m.z))!==JSON.stringify(normalizeBlockState(targetId,m.state||{})))) applyNetworkBlock(m.x,m.y,m.z,targetId,m.state||null);
+        if(getBlock(m.x,m.y,m.z)!==targetId) applyNetworkBlock(m.x,m.y,m.z,targetId);
       }
       return;
     }
     if(m.type==='editRejected'||m.type==='permissionRejected'){
       if(Number.isInteger(m.x)&&Number.isInteger(m.y)&&Number.isInteger(m.z)){
         const k=`${m.x},${m.y},${m.z}`;
-        const placement=pendingOptimisticDoorPlacements.get(k);
-        if(placement){
-          pendingOptimisticDoorPlacements.delete(k);
-          for(const member of placement){ pendingOptimisticEdits.delete(voxelKey(member.x,member.y,member.z)); setBlock(member.x,member.y,member.z,member.previousId,member.previousState||null); }
-        }
         const pending=pendingOptimisticEdits.get(k);
         if(pending){
           pendingOptimisticEdits.delete(k);
-          setBlock(m.x,m.y,m.z,pending.previousId,pending.previousState||null);
+          setBlock(m.x,m.y,m.z,pending.previousId);
         }
-        const pendingState=pendingOptimisticStates.get(k);
-        if(pendingState){ pendingOptimisticStates.delete(k); setBlockState(pendingState.x,pendingState.y,pendingState.z,pendingState.id,pendingState.previous); }
         const pendingDoor=pendingOptimisticDoors.get(k);
         if(pendingDoor){
           pendingOptimisticDoors.delete(k);
@@ -3778,10 +3550,8 @@ function localEnemyGroundAt(x,z){
   return {x,z,y:creatureGroundY(x,z)};
 }
 function localSolidAt(x,y,z){
-  const bx=Math.floor(x),by=Math.floor(y),bz=Math.floor(z),id=getBlock(bx,by,bz);
-  if(!isSolidBlock(id)) return false;
-  const lx=x-bx,ly=y-by,lz=z-bz,state=renderBlockState(bx,by,bz,id);
-  return localShapeBoxes(id,state).some(box=>lx>=box[0]&&lx<=box[3]&&ly>=box[1]&&ly<=box[4]&&lz>=box[2]&&lz<=box[5]);
+  const id=getBlock(Math.floor(x),Math.floor(y),Math.floor(z));
+  return isSolidBlock(id) && !(id===BID.door && openDoors.has(voxelKey(x,y,z)));
 }
 function localTopAt(x,z){
   const bx=Math.floor(x), bz=Math.floor(z), chunk=chunks.get(ck(Math.floor(bx/CS),Math.floor(bz/CS)));
@@ -3984,15 +3754,15 @@ function setWorldEditOverride(x,y,z,id){
   let map=overrides.get(ck(cx,cz)); if(!map){map=new Map();overrides.set(ck(cx,cz),map);} map.set(idx,id);
   markMapSnapshotsDirty(x,z);
 }
-function applyNetworkBlock(x,y,z,id,state=null){
+function applyNetworkBlock(x,y,z,id){
   const cx=Math.floor(x/CS),cz=Math.floor(z/CS),ch=chunks.get(ck(cx,cz));
-  if(ch) setBlock(x,y,z,id,state); else { setWorldEditOverride(x,y,z,id); setStoredBlockState(x,y,z,id,state); }
+  if(ch) setBlock(x,y,z,id); else setWorldEditOverride(x,y,z,id);
 }
 function enterMultiplayerWorld(w){
   mapWorldId=String(w.id||'');mapWorldRevision=Number(w.revision)||0;
   clearAmbientEntities(); resetPlayerHealth(); npcProperties=Array.isArray(w.npcProperties)?w.npcProperties.filter(Boolean):[]; localAmbientNight=null; serverMapFailed=false; serverMapKey={mini:'',full:''}; serverSnapshotKey={mini:'',full:''}; markMapSnapshotsDirty();
   applyClaimSnapshot(w.claim,w.claims);
-  SEED=Number(w.seed)|0; initNoise(); overrides.clear(); blockStates.clear();
+  SEED=Number(w.seed)|0; initNoise(); overrides.clear();
   const edits=w.edits||{};
   for(const key in edits){ const parts=key.split(',').map(Number), id=Number(edits[key]); if(parts.length===3&&parts.every(Number.isInteger)&&Number.isInteger(id)&&id>=0&&id<BLOCKS.length) setWorldEditOverride(parts[0],parts[1],parts[2],id); }
   dayTime=Number.isFinite(Number(w.dayTime))?Number(w.dayTime):.28;
@@ -4003,13 +3773,6 @@ function enterMultiplayerWorld(w){
     player.pos.copy(findSpawn()); player.vel.set(0,0,0);
   }
   hardReset(false);
-  for(const [key,state] of Object.entries(w.blockStates||{})){
-    const parts=key.split(',').map(Number);
-    if(parts.length===3&&parts.every(Number.isInteger)&&state&&typeof state==='object'){
-      const id=Number(edits[key]);
-      blockStates.set(key,normalizeBlockState(Number.isInteger(id)?id:AIR,state));
-    }
-  }
   Object.keys(w.doors||{}).forEach(key=>{if(w.doors[key]===true)openDoors.add(key)});
   Object.keys(w.lights||{}).forEach(key=>{if(w.lights[key]===false)lanternOff.add(key)});
   beginStreamLoading('Joining multiplayer world…');
