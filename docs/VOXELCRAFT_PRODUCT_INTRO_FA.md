@@ -395,6 +395,14 @@ Ore فقط هنگام برخورد با Stone پایه بررسی می‌شود 
 | 49 | Bookshelf | قفسه با کتاب/چوب | دکور و amenity برای analyzer | جامد | 1.2 | هر دو |
 | 50 | Chest | از texture crate استفاده می‌کند | object storage/interactive | جامد | 1 | هر دو |
 | 51 | Table | سطح چوبی با top planks | object دکور/تعامل | جامد | 1 | هر دو |
+| 52 | Oak Slab | نیم‌بلوک چوبی | shape slab؛ state بالا/پایین | نیمه‌جامد | 1.2 | هر دو |
+| 53 | Stone Slab | نیم‌بلوک سنگی | shape slab؛ state بالا/پایین | نیمه‌جامد | 1.6 | هر دو |
+| 54 | Oak Stairs | stair چوبی دو riser | چهار جهت و state بالا/پایین | shape-aware | 1.2 | هر دو |
+| 55 | Stone Stairs | stair سنگی دو riser | چهار جهت و state بالا/پایین | shape-aware | 1.6 | هر دو |
+| 56 | Oak Trapdoor | panel باریک چوبی | shape و open state | وابسته به state | 1 | هر دو |
+| 57 | Oak Fence Gate | gate چوبی | facing و open state | وابسته به state | 1 | هر دو |
+| 58 | Torch | مشعل | shape کوچک و emit | shape-aware | 0.1 | هر دو |
+| 59 | Stone Wall | دیوار کوتاه سنگی | shape حصار | shape-aware | 1.6 | هر دو |
 
 ### دسته‌بندی محصولی blockها
 
@@ -404,10 +412,15 @@ Ore فقط هنگام برخورد با Stone پایه بررسی می‌شود 
 - **Utility:** Crafting Table، Fence، Lantern، Door، Path.
 - **Interactive/prop:** Wooden Door، Lantern، Crate، Barrel، Sign، Bookshelf، Chest، Table و objectهای cabin.
 - **Liquid/flow-like:** Water و Lava؛ کد فعلی آن‌ها را voxel مایع می‌داند و برای collision جامد لحاظ نمی‌کند.
+- **Shape-aware:** Slab، Stair، Trapdoor، Fence، Fence Gate، Torch و Lantern با metadata مشترک shape در mesh، collision و raycast استفاده می‌شوند.
 
 ### نکتهٔ Inventory
 
-Registry شامل ۵۱ شناسهٔ idهای `1..51` است، اما inventory picker آیتم‌های `unbreakable` را حذف می‌کند؛ به همین دلیل کاربر **۵۰ گزینهٔ قابل انتخاب** می‌بیند و Bedrock در picker قرار نمی‌گیرد.
+Registry اکنون ۵۹ شناسهٔ `1..59` دارد؛ inventory picker آیتم‌های `unbreakable` را حذف می‌کند. قرارداد canonical در `shared/block-registry.json` قرار دارد و build آن را هم در client و هم در server استفاده می‌کند.
+
+### قرارداد state و persistence
+
+`worldState` و `blockUpdate` علاوه بر `id`، فیلد `state`/`blockStates` را منتقل می‌کنند. `Door` یک panel واقعی با ضخامت حدود `0.12`، `facing`، `hinge` و animation hinge دارد. `doorToggle` روی سرور permission-check می‌شود و کل زنجیرهٔ عمودی contiguous را با یک revision تغییر می‌دهد؛ `doorPlace` نیز دو segment درب را به‌صورت atomic ثبت می‌کند. Slab و Stair با `upsideDown` و `facing` در collision و raycast همان state را می‌خوانند.
 
 ---
 
@@ -951,8 +964,9 @@ Mini و Full request/cache مستقل دارند، اما قرارداد tile ی
 | درخواست client | پاسخ/رویداد server | رفتار |
 |---|---|---|
 | `blockBreak` | `blockUpdate` یا `editRejected` | break با oldId اختیاری و بررسی voxel فعلی |
-| `blockPlace` | `blockUpdate` یا `editRejected` | place id معتبر و oldId برای جلوگیری از race |
-| `doorToggle` | `doorState` یا `permissionRejected` | تغییر state در world.doors |
+| `blockPlace` | `blockUpdate` یا `editRejected` | place id و state معتبر؛ oldId برای جلوگیری از race |
+| `doorPlace` | دو `blockUpdate` یا `editRejected` | ثبت atomic دو segment با state facing/hinge |
+| `doorToggle` | `doorState` یا `permissionRejected` | تغییر گروه عمودی contiguous در world.doors و blockStates |
 | `lightToggle` | `lightState` یا `permissionRejected` | تغییر state در world.lights |
 | `objectInteract` | `objectInteractAccepted` / `objectInteractRejected` و `objectState` | اعتبارسنجی object واقعی |
 | `chat` | broadcast `chat` | پاک‌سازی `< >`، control chars و محدودیت ۲۴۰ نویسه |

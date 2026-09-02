@@ -5,6 +5,8 @@ const serverDir = __dirname;
 const sourcePath = path.join(serverDir, 'client', 'index.html');
 const publicDir = path.join(serverDir, 'public');
 const outputPath = path.join(publicDir, 'index.html');
+const blockRegistryPath = path.join(serverDir, 'shared', 'block-registry.json');
+const blockRegistry = JSON.parse(fs.readFileSync(blockRegistryPath, 'utf8'));
 
 function readSource() {
   if (!fs.existsSync(sourcePath)) {
@@ -70,7 +72,11 @@ if(SERVER_DEPLOYMENT){
   return html;
 }
 
-const html = injectServerDeployment(readSource());
+let html = injectServerDeployment(readSource());
+// The browser source keeps a small fallback contract for direct local loading;
+// deployment receives the canonical server/client registry from one file.
+const contractScript = `<script>window.__VOXELCRAFT_BLOCK_CONTRACT__=${JSON.stringify(blockRegistry)};</script>`;
+html = html.replace('</head>', `${contractScript}\n</head>`);
 fs.mkdirSync(publicDir, { recursive: true });
 fs.writeFileSync(outputPath, html);
 console.log(`Generated ${path.relative(process.cwd(), outputPath)} from ${path.relative(process.cwd(), sourcePath)}`);

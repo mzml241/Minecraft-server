@@ -93,6 +93,15 @@ The server owns the effective game mode and only accepts flight when the active 
 
 Server collision is generated from the same deterministic terrain, cave, ore, vegetation and landmark rules as `client/index.html`, rather than treating every `y <= terrainHeight` cell as solid. Generated water/lava remain non-solid, open doors are non-solid, and player edits override generated blocks. `objectInteractAccepted`, `objectInteractRejected` and `objectState` are handled by the client; NPC property additions are retained in the multiplayer state.
 
+## Stateful block behavior contract
+
+`shared/block-registry.json` is the canonical ID/shape contract. The build injects it into the browser and the server loads the same file for edit validation, persistence and collision. IDs `52–59` add oak/stone slabs, oak/stone stairs, a trapdoor, fence gate, torch and stone wall without renumbering existing worlds.
+
+- Block state is separate from the raw block ID and is included in `worldState`, `blockUpdate`, local world files and server world saves. State is normalized at both ends before it is rendered or persisted.
+- Slabs use a half-height collision/render shape. Stairs use two risers and `facing` plus `upsideDown`; placement, raycast and collision use that same metadata. Thin doors use a 0.12-block panel, `facing`/`hinge`, authoritative open state and a 240 ms client hinge animation.
+- A door toggle is permission-checked on the server and applies to the contiguous vertical door group. A new door placement is an atomic two-block `doorPlace` request, so a client cannot create a half-door by sending only one segment.
+- Shape blocks use the existing chunk mesh buffers and atlas materials; they do not create one scene object per voxel and do not change the Map Pipeline v3 tile/LOD path.
+
 ## Multi-world administration
 
 Open `/admin`, enter the `ADMIN_TOKEN`, then use **CREATE AND ACTIVATE** to create a terrain world. Leaving the seed blank generates a random seed; an explicit seed makes the terrain reproducible. The active world selector switches the world for all connected players.

@@ -59,6 +59,7 @@ function waitForMessage(socket, predicate, timeoutMs = 5000) {
 function openAndJoin(port) {
   return new Promise((resolve, reject) => {
     const socket = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+    let helloMessage=null;
     const timer = setTimeout(() => {
       socket.terminate();
       reject(new Error('Timed out waiting for WebSocket join response'));
@@ -71,6 +72,7 @@ function openAndJoin(port) {
       let message;
       try { message = JSON.parse(raw.toString()); } catch { return; }
       if (message.type === 'hello') {
+        helloMessage=message;
         assert.equal(message.version, 1);
         socket.send(JSON.stringify({
           type: 'join',
@@ -81,7 +83,7 @@ function openAndJoin(port) {
       }
       if (message.type === 'joined') {
         clearTimeout(timer);
-        resolve({ socket, message });
+        resolve({ socket, message, hello: helloMessage });
       }
     });
   });
@@ -152,6 +154,11 @@ test('server exposes public APIs and authenticates a WebSocket player', async ()
     assert.equal(joined.message.freeClaimAvailable, true);
     assert.equal(joined.message.physics.version, 1);
     assert.equal(joined.message.physics.player.stepHeight, 1.05);
+    assert.deepEqual(joined.hello.blockRegistry, { version: 1, maxId: 59 });
+    assert.deepEqual(joined.message.blockRegistry, { version: 1, maxId: 59 });
+    const worldState = await waitForMessage(joinedSocket, message => message.type === 'worldState');
+    assert.deepEqual(worldState.world.blockRegistry, { version: 1, maxId: 59 });
+    assert.ok(worldState.world.blockStates && typeof worldState.world.blockStates === 'object');
 
     const physicsStatus = await (await fetch(`${base}/api/status`)).json();
     assert.equal(physicsStatus.physics.worldHeight, 80);
