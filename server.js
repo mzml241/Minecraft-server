@@ -2397,7 +2397,13 @@ function serverPlayerMotionValid(client,nx,ny,nz,now,motion={}){
   const isCreative=client.mode==='creative',isFlying=isCreative&&motion.fly===true;
   if(motion.fly===true&&!isCreative) return false;
   const startInWater=serverPlayerInWater(client.x,client.y,client.z),inWater=serverPlayerInWater(nx,ny,nz);
-  const wasGrounded=serverPlayerGrounded(client.x,client.y,client.z),jumpEdge=motion.jump===true&&client.jump!==true;
+  const wasGrounded=serverPlayerGrounded(client.x,client.y,client.z),requestedAutoStep=motion.autoStep===true;
+  // A step is committed locally in one frame. Allow a tiny server/client
+  // grounding discrepancy while that explicit step marker is active, but
+  // still derive support from the authoritative voxel map rather than
+  // trusting the client's onGround bit.
+  const stepGrounded=wasGrounded || (requestedAutoStep && serverPlayerGrounded(client.x,client.y+0.08,client.z));
+  const jumpEdge=motion.jump===true&&client.jump!==true;
   const movement=PHYSICS_CONFIG.movement;
   const maxSpeed=isFlying?movement.flightSpeed:(inWater?movement.waterSpeed:(motion.sprint===true?movement.sprintSpeed:movement.walkSpeed));
   const maxDistance=maxSpeed*elapsed+1.15;
@@ -2406,11 +2412,12 @@ function serverPlayerMotionValid(client,nx,ny,nz,now,motion={}){
   // A jump impulse may only begin while grounded (or while swimming). The
   // reported jump/onGround bits are state hints; the server derives the
   // actual support voxel before accepting the impulse.
-  if(jumpEdge&&!isFlying&&!startInWater&&!wasGrounded) return false;
-  if(!isFlying&&!inWater&&dy>0.62&&!wasGrounded&&!startInWater) return false;
+  if(jumpEdge&&!isFlying&&!startInWater&&!stepGrounded) return false;
+  if(!isFlying&&!inWater&&dy>0.62&&!stepGrounded&&!startInWater) return false;
 
-  if(serverMotionPathClear(client.x,client.y,client.z,nx,ny,nz)) return true;
-  if(!isFlying&&wasGrounded&&!startInWater&&PHYSICS_CONFIG.movement.autoStep&&serverAutoStepPathClear(client,nx,ny,nz)) return true;
+  const directPathClear=serverMotionPathClear(client.x,client.y,client.z,nx,ny,nz);
+  if(directPathClear) return true;
+  if(!isFlying&&stepGrounded&&!startInWater&&PHYSICS_CONFIG.movement.autoStep&&serverAutoStepPathClear(client,nx,ny,nz)) return true;
   return false;
 }
 
@@ -3102,7 +3109,8 @@ function purchaseNpcClaim(client,result){
         inWater:message.inWater===true,
         sprint:message.sprint===true,
         fly:message.fly===true,
-        jump:message.jump===true
+        jump:message.jump===true,
+        autoStep:message.autoStep===true
       };
       if(!serverPlayerMotionValid(client,nextX,nextY,nextZ,now,motion)) return send(ws,{type:'playerStateRejected',reason:'collision_or_teleport',x:client.x,y:client.y,z:client.z});
       client.x=nextX; client.y=nextY; client.z=nextZ; client.lastStateAt=now;

@@ -1851,7 +1851,10 @@ const player = {
   vel: new THREE.Vector3(),
   yaw: 0, pitch: 0,
   onGround: false, fly: false, mode: 'creative',
-  inWater: false, sprint: false, height: 1.8, eye: 1.62, half: 0.3
+  inWater: false, sprint: false, height: 1.8, eye: 1.62, half: 0.3,
+  // Auto-step changes the collision position atomically, but the camera is
+  // eased over the step so a network state packet never looks like a hitch.
+  stepVisualOffset: 0, autoStepUntil: 0
 };
 
 const spawnPoint = new THREE.Vector3(0.5, SEA + 8, 0.5);
@@ -1989,6 +1992,23 @@ function moveAxisPrecise(axis, amount) {
   return false;
 }
 
+function beginAutoStepVisual(deltaY) {
+  // Keep the authoritative/collision position at the stepped location. Only
+  // the camera is eased; this prevents a one-frame vertical snap when the
+  // corresponding playerState packet crosses the network.
+  if (!(deltaY > 0.02)) return;
+  player.stepVisualOffset = -Math.min(STEP_HEIGHT, deltaY);
+  player.autoStepUntil = performance.now() + 140;
+}
+
+function updateAutoStepVisual(dt) {
+  if (player.stepVisualOffset) {
+    player.stepVisualOffset *= Math.exp(-dt / 0.075);
+    if (Math.abs(player.stepVisualOffset) < 0.002) player.stepVisualOffset = 0;
+  }
+  if (performance.now() >= player.autoStepUntil) player.autoStepUntil = 0;
+}
+
 function moveWithAutoStep(dx, dz) {
   const p = player.pos;
   const canAutoStep = serverPhysics.movement?.autoStep !== false && player.onGround && !player.fly && !player.inWater;
@@ -2002,7 +2022,8 @@ function moveWithAutoStep(dx, dz) {
       const flatX = p.x, flatZ = p.z;
       p.set(startX, startY, startZ);
 
-      // 1. Elevated step test
+      // Elevated step test. The collision position is committed in this same
+      // frame; beginAutoStepVisual only smooths what the camera displays.
       p.y += STEP_HEIGHT;
       if (!isAABBColliding(p.x, p.y, p.z)) {
         moveAxisPrecise('x', dx);
@@ -2012,6 +2033,7 @@ function moveWithAutoStep(dx, dz) {
         const distStepSq = (p.x - startX) ** 2 + (p.z - startZ) ** 2;
         const distFlatSq = (flatX - startX) ** 2 + (flatZ - startZ) ** 2;
         if (distStepSq > distFlatSq + 1e-4) {
+          beginAutoStepVisual(p.y - startY);
           return; // Step-up succeeded
         }
       }
@@ -2119,7 +2141,8 @@ function updatePlayer(dt) {
     bobY *= 0.9;
   }
 
-  camera.position.set(player.pos.x, player.pos.y + player.eye + bobY, player.pos.z);
+  updateAutoStepVisual(dt);
+  camera.position.set(player.pos.x, player.pos.y + player.eye + bobY + player.stepVisualOffset, player.pos.z);
   camera.rotation.set(0, 0, 0);
   camera.rotateY(player.yaw);
   camera.rotateX(player.pitch);
@@ -3052,7 +3075,7 @@ function hardReset(newSeed=true){
   chunks.clear(); openDoors.clear(); lanternOff.clear();
   markMapSnapshotsDirty();
   if(newSeed){ overrides.clear(); player.pos.copy(findSpawn()); }
-  player.vel.set(0,0,0); player.onGround=false;
+  player.vel.set(0,0,0); player.onGround=false; player.stepVisualOffset=0; player.autoStepUntil=0;
   buildHotbar(); setHandBlock(hotbar[slot]);
   loadQueue.length=0; initialLoad=true; queueCX=1e9; queueCZ=1e9; queueDirty=true;
 }
@@ -3075,7 +3098,7 @@ const remotePlayers=new Map();
 function applyMultiplayerSpawn(spawn){
   if(!spawn||!Number.isFinite(Number(spawn.x))||!Number.isFinite(Number(spawn.z))) return false;
   const x=Number(spawn.x),z=Number(spawn.z),y=Number.isFinite(Number(spawn.y))?Number(spawn.y):SEA+8;
-  spawnPoint.set(x,y,z); player.pos.set(x,y,z); player.vel.set(0,0,0); player.onGround=false; return true;
+  spawnPoint.set(x,y,z); player.pos.set(x,y,z); player.vel.set(0,0,0); player.onGround=false; player.stepVisualOffset=0; player.autoStepUntil=0; return true;
 }
 let myClaim=null, knownClaims=[], knownPlayers=[], npcProperties=[], claimSelectionMode=false, claimPreview=null, permissionPanelOpen=false, landInspectMode=false, landQuote=null, propertyReport=null, marketListings=[], marketCommissionRate=.05, prefabCatalog=[], prefabPreview=null, prefabGhost=null, businessTerritorySelection=null;
 function applyClaimSnapshot(claim,claims){
@@ -3286,7 +3309,7 @@ const multiplayer={
     }
     if(m.type==='players'){ knownPlayers=Array.isArray(m.players)?m.players:[]; updateRemotePlayers(knownPlayers); updateClaimPermissionPanel?.(); return; }
     if(m.type==='playerStateRejected'){
-      if([m.x,m.y,m.z].every(value=>Number.isFinite(Number(value)))){ player.pos.set(Number(m.x),Number(m.y),Number(m.z)); player.vel.set(0,0,0); player.onGround=false; }
+      if([m.x,m.y,m.z].every(value=>Number.isFinite(Number(value)))){ player.pos.set(Number(m.x),Number(m.y),Number(m.z)); player.vel.set(0,0,0); player.onGround=false; player.stepVisualOffset=0; player.autoStepUntil=0; }
       objectInteractCooldown=0;
       return;
     }
@@ -3362,8 +3385,11 @@ const multiplayer={
     if(!this.connected) return;
     this.sendTimer+=dt;
     if(!paused && this.sendTimer>=0.05){
-      this.sendTimer=0;
-      this.send({type:'playerState',x:player.pos.x,y:player.pos.y,z:player.pos.z,yaw:player.yaw,pitch:player.pitch,mode:player.mode,onGround:player.onGround,inWater:player.inWater,sprint:player.sprint,fly:player.fly,jump:input.jump,selectedBlock:hotbar[slot]});
+      // Preserve the remainder instead of resetting to zero. This keeps the
+      // 20 Hz state stream stable after a long frame (including a step frame)
+      // and avoids bunching the next packet against the render hitch.
+      this.sendTimer-=0.05;
+      this.send({type:'playerState',x:player.pos.x,y:player.pos.y,z:player.pos.z,yaw:player.yaw,pitch:player.pitch,mode:player.mode,onGround:player.onGround,inWater:player.inWater,sprint:player.sprint,fly:player.fly,jump:input.jump,autoStep:performance.now()<player.autoStepUntil,selectedBlock:hotbar[slot]});
     }
   }
 };

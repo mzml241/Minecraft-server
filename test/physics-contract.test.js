@@ -8,7 +8,7 @@ const client = fs.readFileSync(path.join(root, 'client', 'index.html'), 'utf8');
 const server = fs.readFileSync(path.join(root, 'server.js'), 'utf8');
 
 test('client and server expose the same authoritative physics contract', () => {
-  for (const field of ['onGround', 'inWater', 'sprint', 'fly', 'jump']) {
+  for (const field of ['onGround', 'inWater', 'sprint', 'fly', 'jump', 'autoStep']) {
     assert.match(client, new RegExp(`${field}:`), `client must send ${field}`);
     assert.match(server, new RegExp(`${field}:message\\.${field}`), `server must read ${field}`);
   }
