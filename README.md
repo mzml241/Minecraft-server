@@ -2,6 +2,8 @@
 
 This repository contains the multiplayer deployment for VoxelCraft, a browser-based voxel sandbox (not a Vanilla/Paper/Bukkit Minecraft server). The portable local/singleplayer client source is kept in `client/index.html`; `npm start` generates `public/index.html`, a multiplayer-only shell that hides local-world controls and connects to the current server origin.
 
+> **Render free plan / ephemeral disk:** see [docs/PERSISTENT_DATA_RENDER_FREE_FA.md](docs/PERSISTENT_DATA_RENDER_FREE_FA.md) — set `TURSO_DATABASE_URL` + `TURSO_AUTH_TOKEN` and the server mirrors accounts, wallets, ledger and worlds to a free Turso database, restoring them on every boot. The admin panel now has full backup / restore.
+
 ## Run locally
 
 ```bash
