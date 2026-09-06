@@ -214,6 +214,8 @@ const authAttemptCleanup = setInterval(() => {
 authAttemptCleanup.unref?.();
 
 const { DatabaseSync } = require('node:sqlite');
+const { RemoteStore } = require('./remote-store');
+const remoteStore = new RemoteStore({ dataDir: DATA_DIR });
 const SQLITE_DB_PATH = path.join(DATA_DIR, 'voxelcraft.sqlite');
 let sqliteDb = null;
 let stmtUpsertAccount = null;
@@ -642,6 +644,40 @@ function saveWorldRecord(record) {
   }
 }
 function saveWorld() { return saveWorldRecord(world); }
+
+function fullBackupSnapshot() {
+  const files = {};
+  for (const rel of remoteStore.localFiles()) {
+    try { files[rel] = JSON.parse(fs.readFileSync(path.join(DATA_DIR, rel), 'utf8')); } catch (error) { log('Backup skipped', rel, error.message); }
+  }
+  return { format: 'voxelcraft-full-backup', version: 1, createdAt: new Date().toISOString(), activeWorldId, files };
+}
+function restoreFullBackup(payload) {
+  if (!payload || payload.format !== 'voxelcraft-full-backup' || !payload.files || typeof payload.files !== 'object') {
+    throw new Error('Not a VoxelCraft full backup file (expected format voxelcraft-full-backup)');
+  }
+  backupWorld();
+  let written = 0;
+  for (const [rel, content] of Object.entries(payload.files)) {
+    if (!remoteStore.isTracked(rel)) continue;
+    atomicWriteJson(path.join(DATA_DIR, rel), content);
+    written += 1;
+  }
+  if (!written) throw new Error('Backup contained no recognised files');
+  // Wipe the derived SQLite tables so the loaders read the restored JSON.
+  if (sqliteDb) {
+    try { sqliteDb.exec('DELETE FROM accounts; DELETE FROM profiles; DELETE FROM coin_ledger; DELETE FROM spawn_reservations;'); } catch (e) { log('SQLite reset failed:', e.message); }
+  }
+  loadAllWorlds();
+  loadAccounts();
+  loadPlayerProfiles();
+  loadCoinLedger();
+  loadSpawnReservations();
+  if (payload.activeWorldId && worlds.has(safeWorldId(payload.activeWorldId))) switchActiveWorld(safeWorldId(payload.activeWorldId));
+  savePlayerProfiles(); saveAccounts(); saveCoinLedger(); saveSpawnReservations(); saveWorld();
+  remoteStore.push({ force: true });
+  return { files: written, accounts: accounts.size, profiles: playerProfiles.size, ledger: coinLedger.length, worlds: worlds.size, activeWorldId };
+}
 
 function backupWorld() {
   try {
@@ -2582,6 +2618,31 @@ async function handleApi(req, res, url) {
       return json(res, 400, { error: error.message || 'Invalid world file' });
     }
   }
+  if (url.pathname === '/api/admin/backup' && req.method === 'GET') {
+    // Everything under DATA_DIR that the server needs to rebuild its state:
+    // accounts, wallets, ledger, reservations and every world. Persist state
+    // to disk first so the archive reflects live memory.
+    savePlayerProfiles(); saveAccounts(); saveCoinLedger(); saveSpawnReservations(); saveWorld();
+    return json(res, 200, fullBackupSnapshot(), {
+      'Content-Disposition': `attachment; filename="voxelcraft-backup-${new Date().toISOString().slice(0,10)}.json"`
+    });
+  }
+  if (url.pathname === '/api/admin/restore' && req.method === 'POST') {
+    try {
+      const payload = await parseBody(req);
+      const result = restoreFullBackup(payload);
+      broadcast(worldState());
+      broadcast({ type: 'system', message: 'Server data was restored from an administrator backup' });
+      return json(res, 200, { ok: true, ...result });
+    } catch (error) {
+      return json(res, 400, { error: error.message || 'Invalid backup file' });
+    }
+  }
+  if (url.pathname === '/api/admin/sync' && req.method === 'POST') {
+    savePlayerProfiles(); saveAccounts(); saveCoinLedger(); saveSpawnReservations(); saveWorld();
+    const result = await remoteStore.push({ force: true });
+    return json(res, result.error ? 500 : 200, { ...result, status: remoteStore.status() });
+  }
   if (url.pathname === '/api/admin/world/save' && req.method === 'POST') {
     const ok = saveWorld();
     return json(res, ok ? 200 : 500, { ok });
@@ -3113,17 +3174,28 @@ setInterval(() => constructionRunCycle(), NPC_CONSTRUCTION_TICK_MS);
 setInterval(() => saveWorld(), 30000);
 
 ensureWorldDir();
-initSqliteDatabase();
-loadAllWorlds();
-loadAccounts();
-loadPlayerProfiles();
-loadCoinLedger();
-loadSpawnReservations();
+(async () => {
+  // Restore the last durable snapshot before anything reads DATA_DIR. Without
+  // a persistent disk (Render free plan) the directory is empty on each boot.
+  await remoteStore.pull();
+  initSqliteDatabase();
+  loadAllWorlds();
+  loadAccounts();
+  loadPlayerProfiles();
+  loadCoinLedger();
+  loadSpawnReservations();
+  remoteStore.start();
+  startServer();
+})().catch(error => { log('Fatal startup error:', error.message); process.exit(1); });
+
+function startServer() {
 server.listen(PORT, HOST, () => {
   log(`VoxelCraft server listening on http://${HOST}:${PORT} · active world ${world.id}`);
   log(`Game WebSocket: ws://${HOST}:${PORT}/ws`);
   log(`Admin panel: http://${HOST}:${PORT}/admin  token=${ADMIN_TOKEN === 'change-me' ? 'change-me (set ADMIN_TOKEN)' : 'configured'}`);
+  log(`Durable storage: ${remoteStore.enabled ? 'Turso (' + (remoteStore.lastError ? 'ERROR ' + remoteStore.lastError : 'ok') + ')' : 'DISABLED - data lives only in ' + DATA_DIR}`);
 });
+}
 
 function shutdown(signal) {
   log(signal, 'received; saving database and world');
@@ -3136,8 +3208,14 @@ function shutdown(signal) {
     try { sqliteDb.exec('PRAGMA wal_checkpoint(TRUNCATE);'); } catch (e) {}
   }
   for (const client of clients.values()) client.ws.close(1001, 'Server shutting down');
-  server.close(() => process.exit(0));
-  setTimeout(() => process.exit(0), 3000);
+  remoteStore.stop();
+  let exited = false;
+  const finish = () => { if (exited) return; exited = true; process.exit(0); };
+  server.close(() => {});
+  remoteStore.push({ force: true }).then(finish, finish);
+  // Render allows a grace period after SIGTERM; make sure the upload has a
+  // chance to finish but never hang.
+  setTimeout(finish, remoteStore.enabled ? 20000 : 3000);
 }
 process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));

@@ -2,7 +2,10 @@ services:
   - type: web
     name: voxelcraft-server
     runtime: node
-    plan: starter
+    # Free plan: no persistent disk. Durable state is mirrored to Turso
+    # (free tier) by remote-store.js; set the two TURSO_* variables in the
+    # Render dashboard and the server restores them on every boot.
+    plan: free
     rootDir: .
     buildCommand: npm ci --omit=dev
     startCommand: npm start
@@ -19,8 +22,8 @@ services:
       - key: ADMIN_TOKEN
         generateValue: true
       - key: DATA_DIR
-        value: /var/data
-    disk:
-      name: voxelcraft-data
-      mountPath: /var/data
-      sizeGB: 1
+        value: /opt/render/project/data
+      - key: TURSO_DATABASE_URL
+        sync: false
+      - key: TURSO_AUTH_TOKEN
+        sync: false
